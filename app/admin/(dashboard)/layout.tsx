@@ -27,7 +27,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   const totalUsed = aggregation._sum.size || 0;
   
   // Cálculo de porcentagem visual
-  const maxStorage = 5 * 1024 * 1024 * 1024;
+  const maxStorage = 10 * 1024 * 1024 * 1024;
   const percentage = Math.min((totalUsed / maxStorage) * 100, 100);
 
   const formatBytes = (bytes: number) => {
@@ -42,7 +42,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       {/* Passando a informação de Admin para o Sidebar */}
       <Sidebar 
         usagePercent={percentage} 
-        usageText={`${formatBytes(totalUsed)} / 5 GB`} 
+        usageText={`${formatBytes(totalUsed)} / 10 GB`} 
         isAdmin={user.role === 'ADMIN'} // <-- ADICIONAMOS A VERIFICAÇÃO AQUI
       />
       

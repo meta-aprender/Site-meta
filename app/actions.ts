@@ -69,13 +69,13 @@ export async function uploadFiles(formData: FormData) {
 
   const targetUser = await prisma.user.findUnique({ where: { id: targetUserId }, include: { materials: true } });
   
-  // VERIFICAÇÃO APENAS DA COTA GLOBAL (5GB)
-  const MAX_STORAGE = 5 * 1024 * 1024 * 1024; 
+  // VERIFICAÇÃO DA COTA DE USUÁRIO (10GB)
+  const MAX_STORAGE = 10 * 1024 * 1024 * 1024; 
   const currentUsage = targetUser!.materials.reduce((acc, item) => acc + item.size, 0);
   const totalUploadSize = files.reduce((acc, file) => acc + file.size, 0);
 
   if (currentUsage + totalUploadSize > MAX_STORAGE) {
-    throw new Error("Cota global de 5GB excedida para este usuário.");
+    throw new Error("Cota de 10 GB excedida para este usuário.");
   }
 
   for (const file of files) {
