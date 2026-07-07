@@ -35,6 +35,8 @@ async function requireAdmin() {
   return user;
 }
 
+
+
 // Verifica permissão: Retorna o item se o usuário pode mexer nele
 async function checkPermission(itemId: string, userEmail: string) {
   const user = await prisma.user.findUnique({ where: { email: userEmail } });
@@ -49,6 +51,30 @@ async function checkPermission(itemId: string, userEmail: string) {
   }
   
   throw new Error("Permissão negada.");
+}
+async function requireAuthenticatedUser() {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.email) {
+    throw new Error("Login necessário.");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: {
+      email: session.user.email,
+    },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+    },
+  });
+
+  if (!user) {
+    throw new Error("Usuário não encontrado.");
+  }
+
+  return user;
 }
 
 async function getAllFilesRecursively(folderId: string): Promise<{path: string, dbPath: string}[]> {
@@ -131,15 +157,14 @@ export async function uploadFiles(formData: FormData) {
 
 // --- 2. CRIAR PASTA CORRIGIDO (COM HERANÇA DE DONO) ---
 export async function createFolder(formData: FormData) {
-  const session = await getServerSession();
-  const user = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
+  const user = await requireAuthenticatedUser();
   
   const name = formData.get("name") as string;
   const rawParentId = formData.get("parentId") as string;
   const parentId = (rawParentId === "" || rawParentId === "root") ? null : rawParentId;
 
   // Lógica de Dono
-  let targetUserId = user!.id;
+  let targetUserId = user.id;
   if (parentId) {
       const parent = await prisma.material.findUnique({ where: { id: parentId } });
       if (parent) targetUserId = parent.userId;
@@ -148,7 +173,7 @@ export async function createFolder(formData: FormData) {
       if (formTargetId) targetUserId = formTargetId;
   }
 
-  if (user!.id !== targetUserId && user!.role !== 'ADMIN') throw new Error("Sem permissão.");
+  if (user.id !== targetUserId && user.role !== 'ADMIN') throw new Error("Sem permissão.");
 
   await prisma.material.create({
     data: { title: name, type: "FOLDER", size: 0, userId: targetUserId, parentId: parentId }
@@ -158,8 +183,7 @@ export async function createFolder(formData: FormData) {
 
 // --- 3. CRIAR LINK CORRIGIDO (COM HERANÇA DE DONO) ---
 export async function createLink(formData: FormData) {
-    const session = await getServerSession();
-    const user = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
+    const user = await requireAuthenticatedUser();
 
     const title = formData.get("title") as string;
     const url = formData.get("url") as string;
@@ -167,7 +191,7 @@ export async function createLink(formData: FormData) {
     const parentId = (rawParentId === "" || rawParentId === "root") ? null : rawParentId;
 
     // Lógica de Dono
-    let targetUserId = user!.id;
+    let targetUserId = user.id;
     if (parentId) {
         const parent = await prisma.material.findUnique({ where: { id: parentId } });
         if (parent) targetUserId = parent.userId;
@@ -176,7 +200,7 @@ export async function createLink(formData: FormData) {
         if (formTargetId) targetUserId = formTargetId;
     }
 
-    if (user!.id !== targetUserId && user!.role !== 'ADMIN') throw new Error("Sem permissão.");
+    if (user.id !== targetUserId && user.role !== 'ADMIN') throw new Error("Sem permissão.");
 
     await prisma.material.create({
         data: {
@@ -193,11 +217,11 @@ export async function createLink(formData: FormData) {
 
 // --- 4. RENOMEAR (ESTAVA FALTANDO) ---
 export async function renameMaterial(formData: FormData) {
-    const session = await getServerSession();
+    const user = await requireAuthenticatedUser();
     const itemId = formData.get("itemId") as string;
     const newName = formData.get("newName") as string;
 
-    await checkPermission(itemId, session?.user?.email!);
+    await checkPermission(itemId, user.email);
 
     await prisma.material.update({
         where: { id: itemId },
@@ -208,43 +232,75 @@ export async function renameMaterial(formData: FormData) {
 
 // --- 5. EXCLUIR USUÁRIO ---
 export async function deleteUser(formData: FormData) {
-    const session = await getServerSession();
-    const currentUser = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
-    
-    if (currentUser?.role !== 'ADMIN') throw new Error("Apenas Admin pode excluir usuários.");
+  const currentUser = await requireAdmin();
 
-    const userIdToDelete = formData.get("userId") as string;
-    if (userIdToDelete === currentUser!.id) throw new Error("Você não pode excluir a si mesmo.");
+  const userIdToDelete = formData.get("userId") as string;
 
-    const userMaterials = await prisma.material.findMany({ where: { userId: userIdToDelete } });
-    for (const item of userMaterials) {
-        await deleteMaterial(item.id); 
-    }
+  if (!userIdToDelete) {
+    throw new Error("Usuário não informado.");
+  }
 
-    await prisma.user.delete({ where: { id: userIdToDelete } });
-    revalidatePath("/admin/users");
+  if (userIdToDelete === currentUser.id) {
+    throw new Error("Você não pode excluir a própria conta.");
+  }
+
+  const userToDelete = await prisma.user.findUnique({
+    where: { id: userIdToDelete },
+  });
+
+  if (!userToDelete) {
+    throw new Error("Usuário não encontrado.");
+  }
+
+  const userMaterials = await prisma.material.findMany({
+    where: { userId: userIdToDelete },
+  });
+
+  for (const item of userMaterials) {
+    await deleteMaterial(item.id);
+  }
+
+  await prisma.user.delete({
+    where: { id: userIdToDelete },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/users");
+  revalidatePath("/admin/dashboard");
 }
-
 // --- 6. MOVER ---
 export async function moveMaterial(formData: FormData) {
-  const session = await getServerSession();
+  const user = await requireAuthenticatedUser();
   const itemId = formData.get("itemId") as string;
   const newParentId = formData.get("newParentId") as string;
   const finalParentId = (newParentId === "root" || newParentId === "") ? null : newParentId;
 
-  await checkPermission(itemId, session?.user?.email!);
+  const { item } = await checkPermission(itemId, user.email);
 
   if (itemId === finalParentId) throw new Error("Destino inválido.");
 
   if (finalParentId) {
-    let currentCheckId = finalParentId;
-    while (currentCheckId) {
-      if (currentCheckId === itemId) throw new Error("Não pode mover para subpasta própria.");
-      const parent = await prisma.material.findUnique({ where: { id: currentCheckId } });
-      if (!parent || !parent.parentId) break;
-      currentCheckId = parent.parentId;
+    const destination = await prisma.material.findUnique({
+      where: { id: finalParentId },
+    });
+
+    if (!destination || destination.type !== "FOLDER") {
+      throw new Error("Pasta de destino inválida.");
     }
-  }
+
+    if (destination.userId !== item.userId) {
+      throw new Error(
+        "Não é permitido mover materiais entre usuários diferentes."
+      );
+    }
+      let currentCheckId = finalParentId;
+      while (currentCheckId) {
+        if (currentCheckId === itemId) throw new Error("Não pode mover para subpasta própria.");
+        const parent = await prisma.material.findUnique({ where: { id: currentCheckId } });
+        if (!parent || !parent.parentId) break;
+        currentCheckId = parent.parentId;
+      }
+    }
 
   await prisma.material.update({
     where: { id: itemId },
@@ -255,24 +311,54 @@ export async function moveMaterial(formData: FormData) {
 
 // --- 7. DELETAR RECURSIVO ---
 export async function deleteMaterial(id: string) {
-  const session = await getServerSession();
-  try {
-     await checkPermission(id, session?.user?.email!);
-  } catch { return; }
+  const user = await requireAuthenticatedUser();
 
-  const item = await prisma.material.findUnique({ where: { id } });
+  try {
+    await checkPermission(id, user.email);
+  } catch {
+    return;
+  }
+
+  const item = await prisma.material.findUnique({
+    where: { id },
+  });
+
   if (!item) return;
 
-  if (item.type === 'FOLDER') {
-    const children = await prisma.material.findMany({ where: { parentId: id } });
+  if (item.type === "FOLDER") {
+    const children = await prisma.material.findMany({
+      where: { parentId: id },
+    });
+
     for (const child of children) {
       await deleteMaterial(child.id);
     }
-  } else if (item.fileUrl && item.type !== 'LINK') {
-      try { await unlink(join(process.cwd(), "public", item.fileUrl)); } catch {}
+  } else if (item.fileUrl && item.type !== "LINK") {
+    const storageRoot = resolve(process.cwd(), "storage");
+
+    const relativePath = item.fileUrl
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "");
+
+    const filePath = resolve(storageRoot, relativePath);
+
+    if (!filePath.startsWith(`${storageRoot}${sep}`)) {
+      throw new Error("Caminho de arquivo inválido.");
+    }
+
+    try {
+      await unlink(filePath);
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") {
+        throw error;
+      }
+    }
   }
 
-  await prisma.material.delete({ where: { id } });
+  await prisma.material.delete({
+    where: { id },
+  });
+
   revalidatePath("/admin/dashboard");
 }
 
