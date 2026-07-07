@@ -421,74 +421,257 @@ export async function downloadBackup() {
 
 // --- AÇÕES ADMIN / OUTROS ---
 export async function createNewUser(formData: FormData) {
-  const session = await getServerSession();
-  const currentUser = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
-  
-  if (currentUser?.role !== 'ADMIN') throw new Error("Apenas Admin pode criar usuários.");
+  await requireAdmin();
 
-  const name = formData.get("name") as string;
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
-  const role = formData.get("role") as string;
-  const passwordHash = await hash(password, 6);
-  
-  await prisma.user.create({
-    data: { name, email, password: passwordHash, role, folderName: `Pasta de ${name}` }
+  const name =
+    formData.get("name")?.toString().trim() || "";
+
+  const email =
+    formData.get("email")?.toString().trim().toLowerCase() || "";
+
+  const password =
+    formData.get("password")?.toString() || "";
+
+  const requestedRole =
+    formData.get("role")?.toString();
+
+  const role =
+    requestedRole === "ADMIN" ? "ADMIN" : "USER";
+
+  if (!name || !email || !password) {
+    throw new Error(
+      "Nome, e-mail e senha são obrigatórios."
+    );
+  }
+
+  if (password.length < 8) {
+    throw new Error(
+      "A senha deve ter pelo menos 8 caracteres."
+    );
+  }
+
+  const existingUser = await prisma.user.findUnique({
+    where: {
+      email,
+    },
   });
+
+  if (existingUser) {
+    throw new Error(
+      "Já existe um usuário com este e-mail."
+    );
+  }
+
+  const passwordHash = await hash(password, 10);
+
+  await prisma.user.create({
+    data: {
+      name,
+      email,
+      password: passwordHash,
+      role,
+      folderName: `Pasta de ${name}`,
+    },
+  });
+
   revalidatePath("/admin/users");
 }
 
 export async function updateProfile(formData: FormData) {
-  const session = await getServerSession();
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.email) {
+    throw new Error("Login necessário.");
+  }
+
+  const folderName =
+    formData.get("folderName")?.toString().trim() ||
+    "Minha Pasta";
+
+  const folderCategory =
+    formData.get("folderCategory")?.toString().trim() ||
+    "Geral";
+
+  const folderDescription =
+    formData
+      .get("folderDescription")
+      ?.toString()
+      .trim() || null;
+
   await prisma.user.update({
-    where: { email: session!.user!.email! },
+    where: {
+      email: session.user.email,
+    },
     data: {
-      folderName: formData.get("folderName") as string,
-      folderCategory: formData.get("folderCategory") as string,
-      folderDescription: formData.get("folderDescription") as string,
+      folderName,
+      folderCategory,
+      folderDescription,
     },
   });
+
   revalidatePath("/");
   revalidatePath("/admin/settings");
 }
 
-export async function getFolderContents(folderId: string) {
-   return await prisma.material.findMany({ 
-     where: { parentId: folderId }, 
-     orderBy: { type: 'asc' } 
-   });
+export async function getFolderContents(
+  folderId: string
+) {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.email) {
+    throw new Error("Login necessário.");
+  }
+
+  const currentUser = await prisma.user.findUnique({
+    where: {
+      email: session.user.email,
+    },
+    select: {
+      id: true,
+      role: true,
+    },
+  });
+
+  if (!currentUser) {
+    throw new Error("Usuário não encontrado.");
+  }
+
+  const folder = await prisma.material.findUnique({
+    where: {
+      id: folderId,
+    },
+    select: {
+      userId: true,
+      type: true,
+    },
+  });
+
+  if (!folder || folder.type !== "FOLDER") {
+    throw new Error("Pasta não encontrada.");
+  }
+
+  if (
+    folder.userId !== currentUser.id &&
+    currentUser.role !== "ADMIN"
+  ) {
+    throw new Error(
+      "Você não possui permissão para acessar esta pasta."
+    );
+  }
+
+  return prisma.material.findMany({
+    where: {
+      parentId: folderId,
+    },
+    orderBy: {
+      type: "asc",
+    },
+  });
 }
 
 // --- ATUALIZAR USUÁRIO (ADMIN) ---
-export async function updateUser(formData: FormData) {
-  const session = await getServerSession();
-  const currentUser = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
+export async function updateUser(
+  formData: FormData
+) {
+  await requireAdmin();
 
-  if (currentUser?.role !== 'ADMIN') {
-    throw new Error("Permissão negada. Apenas administradores podem editar usuários.");
+  const userIdToUpdate =
+    formData.get("userId")?.toString() || "";
+
+  const name =
+    formData.get("name")?.toString().trim() || "";
+
+  const email =
+    formData.get("email")?.toString().trim().toLowerCase() || "";
+
+  const requestedRole =
+    formData.get("role")?.toString();
+
+  const role =
+    requestedRole === "ADMIN" ? "ADMIN" : "USER";
+
+  const password =
+    formData.get("password")?.toString() || "";
+
+  if (!userIdToUpdate || !name || !email) {
+    throw new Error(
+      "Usuário, nome e e-mail são obrigatórios."
+    );
   }
 
-  const userIdToUpdate = formData.get("userId") as string;
-  const name = formData.get("name") as string;
-  const email = formData.get("email") as string;
-  const role = formData.get("role") as string;
-  const password = formData.get("password") as string;
+  const targetUser = await prisma.user.findUnique({
+    where: {
+      id: userIdToUpdate,
+    },
+    select: {
+      id: true,
+      role: true,
+    },
+  });
 
-  // Prepara os dados para atualização
-  const updateData: any = {
+  if (!targetUser) {
+    throw new Error("Usuário não encontrado.");
+  }
+
+  const conflictingUser =
+    await prisma.user.findFirst({
+      where: {
+        email,
+        id: {
+          not: userIdToUpdate,
+        },
+      },
+    });
+
+  if (conflictingUser) {
+    throw new Error(
+      "Já existe outro usuário com este e-mail."
+    );
+  }
+
+  if (
+    targetUser.role === "ADMIN" &&
+    role !== "ADMIN"
+  ) {
+    const adminCount = await prisma.user.count({
+      where: {
+        role: "ADMIN",
+      },
+    });
+
+    if (adminCount <= 1) {
+      throw new Error(
+        "Não é possível remover o único administrador."
+      );
+    }
+  }
+
+  const updateData: {
+    name: string;
+    email: string;
+    role: string;
+    password?: string;
+  } = {
     name,
     email,
-    role
+    role,
   };
 
-  // Só atualiza a senha se o campo não estiver vazio
-  if (password && password.trim() !== "") {
-    updateData.password = await hash(password, 6);
+  if (password.trim()) {
+    if (password.length < 8) {
+      throw new Error(
+        "A nova senha deve ter pelo menos 8 caracteres."
+      );
+    }
+
+    updateData.password = await hash(password, 10);
   }
 
   await prisma.user.update({
-    where: { id: userIdToUpdate },
-    data: updateData
+    where: {
+      id: userIdToUpdate,
+    },
+    data: updateData,
   });
 
   revalidatePath("/admin/users");
