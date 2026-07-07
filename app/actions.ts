@@ -11,6 +11,29 @@ import { randomUUID } from "crypto";
 import { authOptions } from "./lib/auth";
 
 // --- HELPERS ---
+async function requireAdmin() {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.email) {
+    throw new Error("Login necessário.");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: {
+      email: session.user.email,
+    },
+    select: {
+      id: true,
+      role: true,
+    },
+  });
+
+  if (!user || user.role !== "ADMIN") {
+    throw new Error("Sem permissão.");
+  }
+
+  return user;
+}
 
 // Verifica permissão: Retorna o item se o usuário pode mexer nele
 async function checkPermission(itemId: string, userEmail: string) {
@@ -472,6 +495,7 @@ export async function updateUser(formData: FormData) {
 }
 
 export async function moveUserOrder(formData: FormData) {
+  await requireAdmin();
   const userId = formData.get("userId") as string;
   const direction = formData.get("direction") as "up" | "down";
 
@@ -557,9 +581,7 @@ export async function createMaterial(formData: FormData) {
 
 // --- 10. EXCLUIR LIVRO DO CATÁLOGO ---
 export async function deleteBook(formData: FormData) {
-  const session = await getServerSession();
-  const user = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
-  if (user?.role !== 'ADMIN') throw new Error("Sem permissão.");
+  await requireAdmin();
 
   const bookId = formData.get("bookId") as string;
   const book = await prisma.book.findUnique({ where: { id: bookId } });
@@ -583,62 +605,235 @@ export async function deleteBook(formData: FormData) {
 
 
 export async function createBook(formData: FormData) {
-  const title = formData.get("title") as string;
-  const category = formData.get("category") as string;
-  const subCategory = formData.get("subCategory") as string;
-  const type = formData.get("type") as string; 
-  const userId = formData.get("userId") as string;
-  
-  const coverFile = formData.get("cover") as File;
-  const contentFile = formData.get("contentFile") as File;
-  const contentLink = formData.get("contentLink") as string;
+  const admin = await requireAdmin();
 
-  try {
-    // 1. CORREÇÃO: Salvar a Capa na pasta 'storage/covers' e padronizar nome
-    const coverName = `${Date.now()}-capa.jpg`; 
-    const coverDir = join(process.cwd(), "storage", "covers");
-    await mkdir(coverDir, { recursive: true });
-    const coverBuffer = Buffer.from(await coverFile.arrayBuffer());
-    await writeFile(join(coverDir, coverName), coverBuffer);
-    
-    // Caminho relativo para a nossa API buscar depois
-    const coverUrl = `covers/${coverName}`;
+  const title =
+    formData.get("title")?.toString().trim() || "";
 
-    // 2. Processar o Conteúdo
-    let finalContentUrl = "";
-    if (type === 'FILE' && contentFile) {
-      const fileName = `${Date.now()}-${contentFile.name.replace(/\s/g, "_")}`;
-      const storageDir = join(process.cwd(), "storage", "books");
-      await mkdir(storageDir, { recursive: true });
-      const fileBuffer = Buffer.from(await contentFile.arrayBuffer());
-      await writeFile(join(storageDir, fileName), fileBuffer);
-      finalContentUrl = `books/${fileName}`; 
-    } else {
-      finalContentUrl = contentLink;
+  const category =
+    formData.get("category")?.toString().trim() || "";
+
+  const subCategory =
+    formData.get("subCategory")?.toString().trim() || "";
+
+  const type =
+    formData.get("type")?.toString().trim() || "";
+
+  const contentLink =
+    formData.get("contentLink")?.toString().trim() || "";
+
+  const coverFile = formData.get("cover");
+  const contentFile = formData.get("contentFile");
+
+  if (!title || !category) {
+    return {
+      error: "Informe o título e a categoria.",
+    };
+  }
+
+  if (type !== "FILE" && type !== "LINK") {
+    return {
+      error: "Formato de livro inválido.",
+    };
+  }
+
+  if (
+    !(coverFile instanceof File) ||
+    coverFile.size === 0
+  ) {
+    return {
+      error: "Selecione uma capa.",
+    };
+  }
+
+  const allowedCoverTypes = new Set([
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+  ]);
+
+  if (!allowedCoverTypes.has(coverFile.type)) {
+    return {
+      error: "A capa deve ser JPG, PNG ou WEBP.",
+    };
+  }
+
+  const MAX_COVER_SIZE =
+    5 * 1024 * 1024;
+
+  if (coverFile.size > MAX_COVER_SIZE) {
+    return {
+      error: "A capa deve ter no máximo 5 MB.",
+    };
+  }
+
+  if (type === "FILE") {
+    if (
+      !(contentFile instanceof File) ||
+      contentFile.size === 0
+    ) {
+      return {
+        error: "Selecione o arquivo PDF.",
+      };
     }
 
-    // 3. Salvar no Banco
+    const isPdf =
+      contentFile.type === "application/pdf" ||
+      contentFile.name.toLowerCase().endsWith(".pdf");
+
+    if (!isPdf) {
+      return {
+        error: "O arquivo do livro deve ser PDF.",
+      };
+    }
+
+    const MAX_PDF_SIZE =
+      40 * 1024 * 1024;
+
+    if (contentFile.size > MAX_PDF_SIZE) {
+      return {
+        error: "O PDF deve ter no máximo 40 MB.",
+      };
+    }
+  }
+
+  if (type === "LINK") {
+    try {
+      const parsedUrl = new URL(contentLink);
+
+      if (
+        parsedUrl.protocol !== "https:" &&
+        parsedUrl.protocol !== "http:"
+      ) {
+        throw new Error();
+      }
+    } catch {
+      return {
+        error: "Informe um link válido.",
+      };
+    }
+  }
+
+  const writtenPaths: string[] = [];
+
+  try {
+    const coverExtension =
+      coverFile.type === "image/png"
+        ? "png"
+        : coverFile.type === "image/webp"
+          ? "webp"
+          : "jpg";
+
+    const coverName =
+      `${randomUUID()}.${coverExtension}`;
+
+    const coverDirectory = join(
+      process.cwd(),
+      "storage",
+      "covers"
+    );
+
+    await mkdir(coverDirectory, {
+      recursive: true,
+    });
+
+    const coverPath = join(
+      coverDirectory,
+      coverName
+    );
+
+    const coverBuffer = Buffer.from(
+      await coverFile.arrayBuffer()
+    );
+
+    await writeFile(
+      coverPath,
+      coverBuffer
+    );
+
+    writtenPaths.push(coverPath);
+
+    const coverUrl =
+      `covers/${coverName}`;
+
+    let finalContentUrl = contentLink;
+
+    if (
+      type === "FILE" &&
+      contentFile instanceof File
+    ) {
+      const bookFileName =
+        `${randomUUID()}.pdf`;
+
+      const booksDirectory = join(
+        process.cwd(),
+        "storage",
+        "books"
+      );
+
+      await mkdir(booksDirectory, {
+        recursive: true,
+      });
+
+      const bookFilePath = join(
+        booksDirectory,
+        bookFileName
+      );
+
+      const fileBuffer = Buffer.from(
+        await contentFile.arrayBuffer()
+      );
+
+      await writeFile(
+        bookFilePath,
+        fileBuffer
+      );
+
+      writtenPaths.push(bookFilePath);
+
+      finalContentUrl =
+        `books/${bookFileName}`;
+    }
+
     await prisma.book.create({
       data: {
-        title, category, subCategory: subCategory || null, type,
-        coverUrl, contentUrl: finalContentUrl, userId
-      }
+        title,
+        category,
+        subCategory: subCategory || null,
+        type,
+        coverUrl,
+        contentUrl: finalContentUrl,
+        userId: admin.id,
+      },
     });
 
     revalidatePath("/");
     revalidatePath("/admin/dashboard/books");
-    return { success: true };
+
+    return {
+      success: true,
+    };
   } catch (error) {
-    console.error("Erro ao cadastrar livro:", error);
-    return { error: "Falha ao processar o cadastro." };
+    await Promise.allSettled(
+      writtenPaths.map((filePath) =>
+        unlink(filePath)
+      )
+    );
+
+    console.error(
+      "Erro ao cadastrar livro:",
+      error
+    );
+
+    return {
+      error: "Falha ao processar o cadastro.",
+    };
   }
 }
 
 // --- 11. EDITAR LIVRO (APENAS TEXTOS E LINKS) ---
 export async function updateBook(formData: FormData) {
-  const session = await getServerSession();
-  const user = await prisma.user.findUnique({ where: { email: session?.user?.email! } });
-  if (user?.role !== 'ADMIN') throw new Error("Sem permissão.");
+  await requireAdmin();
 
   const id = formData.get("bookId") as string;
   const title = formData.get("title") as string;
