@@ -3,10 +3,12 @@
 import { prisma } from "./lib/prisma";
 import { revalidatePath } from "next/cache";
 import { writeFile, mkdir, unlink } from "fs/promises";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { getServerSession } from "next-auth";
 import { hash } from "bcryptjs";
-import AdmZip from "adm-zip"; 
+import AdmZip from "adm-zip";
+import { randomUUID } from "crypto";
+import { authOptions } from "./lib/auth";
 
 // --- HELPERS ---
 
@@ -253,51 +255,145 @@ export async function deleteMaterial(id: string) {
 
 // --- 8. BACKUP (ZIP) ---
 export async function downloadBackup() {
-    const session = await getServerSession();
-    if (!session?.user?.email) throw new Error("Login necessário");
-    
-    const user = await prisma.user.findUnique({ where: { email: session.user.email } });
-    
-    const zip = new AdmZip();
-    
-    // Busca TODOS os materiais (arquivos e pastas) deste usuário de uma vez só
-    const allMaterials = await prisma.material.findMany({ 
-        where: { userId: user!.id } 
-    });
+  const session = await getServerSession(authOptions);
 
-    // Função interna para descobrir o caminho exato de uma pasta (ex: "Matematica/Provas/")
-    const getZipPath = (item: any, allItems: any[]): string => {
-        if (!item.parentId) return ""; // Se está na raiz, não tem caminho antes
-        const parent = allItems.find(i => i.id === item.parentId);
-        if (!parent) return "";
-        return getZipPath(parent, allItems) + parent.title + "/";
-    };
+  if (!session?.user?.email) {
+    throw new Error("Login necessário.");
+  }
 
-    for (const item of allMaterials) {
-        if (item.type !== 'FOLDER' && item.type !== 'LINK' && item.fileUrl) {
-            // É um arquivo real
-            try {
-                const filePath = join(process.cwd(), "storage", item.fileUrl);
-                const folderPathInsideZip = getZipPath(item, allMaterials); // Descobre onde colocar no ZIP
-                
-                // Adiciona o arquivo dentro da pasta certa no ZIP
-                zip.addLocalFile(filePath, folderPathInsideZip);
-            } catch (e) { console.log("Arquivo não encontrado:", item.title); }
-            
-        } else if (item.type === 'FOLDER') {
-            // Se for uma pasta, cria ela vazia no ZIP (caso não tenha arquivos dentro, ela não some)
-            const folderPathInsideZip = getZipPath(item, allMaterials) + item.title + "/";
-            zip.addFile(folderPathInsideZip, Buffer.alloc(0));
-        }
+  const user = await prisma.user.findUnique({
+    where: {
+      email: session.user.email,
+    },
+    select: {
+      id: true,
+    },
+  });
+
+  if (!user) {
+    throw new Error("Usuário não encontrado.");
+  }
+
+  const zip = new AdmZip();
+
+  const allMaterials = await prisma.material.findMany({
+    where: {
+      userId: user.id,
+    },
+  });
+
+  const sanitizeZipSegment = (value: string) => {
+    return (
+      value
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+        .replace(/\.\./g, "_")
+        .trim() || "sem-nome"
+    );
+  };
+
+  const getZipPath = (
+    item: (typeof allMaterials)[number],
+    allItems: typeof allMaterials
+  ): string => {
+    if (!item.parentId) {
+      return "";
     }
 
-    const backupName = `backup-${user!.name.replace(/\s+/g, '-')}-${Date.now()}.zip`;
-    const backupPath = join(process.cwd(), "storage", "backups");
-    await mkdir(backupPath, { recursive: true });
-    
-    await zip.writeZipPromise(join(backupPath, backupName));
-    
-    return `/backups/${backupName}`;
+    const parent = allItems.find(
+      (candidate) => candidate.id === item.parentId
+    );
+
+    if (!parent) {
+      return "";
+    }
+
+    return (
+      getZipPath(parent, allItems) +
+      sanitizeZipSegment(parent.title) +
+      "/"
+    );
+  };
+
+  const storageRoot = resolve(
+    process.cwd(),
+    "storage"
+  );
+
+  for (const item of allMaterials) {
+    if (
+      item.type !== "FOLDER" &&
+      item.type !== "LINK" &&
+      item.fileUrl
+    ) {
+      try {
+        const relativeFilePath = item.fileUrl.replace(
+          /^[/\\]+/,
+          ""
+        );
+
+        const filePath = resolve(
+          storageRoot,
+          relativeFilePath
+        );
+
+        if (
+          !filePath.startsWith(
+            `${storageRoot}${sep}`
+          )
+        ) {
+          throw new Error(
+            "Caminho de arquivo inválido."
+          );
+        }
+
+        const folderPathInsideZip = getZipPath(
+          item,
+          allMaterials
+        );
+
+        zip.addLocalFile(
+          filePath,
+          folderPathInsideZip
+        );
+      } catch (error) {
+        console.error(
+          "Arquivo não incluído no backup:",
+          item.title,
+          error
+        );
+      }
+    } else if (item.type === "FOLDER") {
+      const folderPathInsideZip =
+        getZipPath(item, allMaterials) +
+        sanitizeZipSegment(item.title) +
+        "/";
+
+      zip.addFile(
+        folderPathInsideZip,
+        Buffer.alloc(0)
+      );
+    }
+  }
+
+  const backupName =
+    `${Date.now()}-${randomUUID()}.zip`;
+
+  const backupDirectory = join(
+    process.cwd(),
+    "storage",
+    "backups",
+    user.id
+  );
+
+  await mkdir(backupDirectory, {
+    recursive: true,
+  });
+
+  await zip.writeZipPromise(
+    join(backupDirectory, backupName)
+  );
+
+  return `/backups/${user.id}/${backupName}`;
 }
 
 // --- AÇÕES ADMIN / OUTROS ---

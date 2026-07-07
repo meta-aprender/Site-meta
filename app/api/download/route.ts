@@ -1,66 +1,386 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFile, unlink } from "fs/promises";
-import { join } from "path";
+import { basename, resolve, sep } from "path";
+import { getServerSession } from "next-auth";
 
-// Função auxiliar para identificar o tipo correto do arquivo para o navegador não se confundir
+import { prisma } from "../../lib/prisma";
+import { authOptions } from "../../lib/auth";
+
+export const runtime = "nodejs";
+
 function getContentType(filename: string) {
-  const ext = filename.split('.').pop()?.toLowerCase();
-  
-  switch (ext) {
-    case 'pdf': return 'application/pdf';
-    case 'doc': return 'application/msword';
-    case 'docx': return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-    case 'xls': return 'application/vnd.ms-excel';
-    case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-    case 'ppt': return 'application/vnd.ms-powerpoint';
-    case 'pptx': return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
-    case 'png': return 'image/png';
-    case 'jpg':
-    case 'jpeg': return 'image/jpeg';
-    default: return 'application/octet-stream'; // Padrão genérico
+  const extension = filename.split(".").pop()?.toLowerCase();
+
+  switch (extension) {
+    case "pdf":
+      return "application/pdf";
+    case "doc":
+      return "application/msword";
+    case "docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case "xls":
+      return "application/vnd.ms-excel";
+    case "xlsx":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case "ppt":
+      return "application/vnd.ms-powerpoint";
+    case "pptx":
+      return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    case "zip":
+      return "application/zip";
+    case "txt":
+      return "text/plain; charset=utf-8";
+    default:
+      return "application/octet-stream";
   }
 }
 
-export async function GET(req: NextRequest) {
-  const pathParam = req.nextUrl.searchParams.get("path");
-  const cleanup = req.nextUrl.searchParams.get("cleanup");
-  
-  // 1. Lemos o novo parâmetro 'view' que enviamos do Modal
-  const isView = req.nextUrl.searchParams.get("view") === "true"; 
+function normalizeStoragePath(rawPath: string) {
+  const normalizedPath = rawPath
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "");
 
-  if (!pathParam) {
-    return new NextResponse("Caminho não informado", { status: 400 });
+  if (
+    !normalizedPath ||
+    normalizedPath.includes("\0")
+  ) {
+    return null;
   }
 
-  const cleanPath = pathParam.replace(/^\//, ''); 
-  const filePath = join(process.cwd(), "storage", cleanPath);
-  
+  const segments = normalizedPath.split("/");
+
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".."
+    )
+  ) {
+    return null;
+  }
+
+  return normalizedPath;
+}
+
+async function getAuthenticatedUser() {
+  const session = await getServerSession(authOptions);
+
+  if (!session?.user?.email) {
+    return null;
+  }
+
+  return prisma.user.findUnique({
+    where: {
+      email: session.user.email,
+    },
+    select: {
+      id: true,
+      role: true,
+    },
+  });
+}
+
+export async function GET(req: NextRequest) {
+  const rawPath =
+    req.nextUrl.searchParams.get("path");
+
+  const wantsCleanup =
+    req.nextUrl.searchParams.get("cleanup") ===
+    "true";
+
+  const wantsView =
+    req.nextUrl.searchParams.get("view") ===
+    "true";
+
+  if (!rawPath) {
+    return new NextResponse(
+      "Caminho não informado.",
+      { status: 400 }
+    );
+  }
+
+  const storagePath =
+    normalizeStoragePath(rawPath);
+
+  if (!storagePath) {
+    return new NextResponse(
+      "Caminho inválido.",
+      { status: 400 }
+    );
+  }
+
+  const segments = storagePath.split("/");
+  const storageCategory = segments[0];
+
+  let downloadName = basename(storagePath);
+  let cleanupAllowed = false;
+  let isPublicFile = false;
+
+  const pathCandidates = [
+    storagePath,
+    `/${storagePath}`,
+  ];
+
+  /*
+   * Materiais enviados pelos usuários:
+   * somente o proprietário ou um administrador.
+   */
+  if (storageCategory === "uploads") {
+    if (segments.length !== 2) {
+      return new NextResponse(
+        "Caminho de material inválido.",
+        { status: 400 }
+      );
+    }
+
+    const currentUser =
+      await getAuthenticatedUser();
+
+    if (!currentUser) {
+      return new NextResponse(
+        "Não autorizado.",
+        { status: 401 }
+      );
+    }
+
+    const material =
+      await prisma.material.findFirst({
+        where: {
+          fileUrl: {
+            in: pathCandidates,
+          },
+        },
+        select: {
+          title: true,
+          userId: true,
+        },
+      });
+
+    if (!material) {
+      return new NextResponse(
+        "Arquivo não encontrado.",
+        { status: 404 }
+      );
+    }
+
+    if (
+      material.userId !== currentUser.id &&
+      currentUser.role !== "ADMIN"
+    ) {
+      return new NextResponse(
+        "Você não possui permissão para acessar este arquivo.",
+        { status: 403 }
+      );
+    }
+
+    downloadName = material.title;
+  }
+
+  /*
+   * Capas de livros:
+   * podem ser exibidas no catálogo público,
+   * mas precisam existir no banco.
+   */
+  else if (storageCategory === "covers") {
+    if (segments.length !== 2) {
+      return new NextResponse(
+        "Caminho de capa inválido.",
+        { status: 400 }
+      );
+    }
+
+    const book = await prisma.book.findFirst({
+      where: {
+        OR: [
+          { coverUrl: storagePath },
+          { coverUrl: `/${storagePath}` },
+        ],
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!book) {
+      return new NextResponse(
+        "Capa não encontrada.",
+        { status: 404 }
+      );
+    }
+
+    isPublicFile = true;
+  }
+
+  /*
+   * Arquivos de livros:
+   * são públicos quando estiverem cadastrados.
+   */
+  else if (storageCategory === "books") {
+    if (segments.length !== 2) {
+      return new NextResponse(
+        "Caminho de livro inválido.",
+        { status: 400 }
+      );
+    }
+
+    const book = await prisma.book.findFirst({
+      where: {
+        OR: [
+          { contentUrl: storagePath },
+          { contentUrl: `/${storagePath}` },
+        ],
+      },
+      select: {
+        title: true,
+      },
+    });
+
+    if (!book) {
+      return new NextResponse(
+        "Livro não encontrado.",
+        { status: 404 }
+      );
+    }
+
+    isPublicFile = true;
+  }
+
+  /*
+   * Backups:
+   * somente o proprietário ou um administrador.
+   * Apenas backups podem usar cleanup=true.
+   */
+  else if (storageCategory === "backups") {
+    if (
+      segments.length !== 3 ||
+      !segments[2].toLowerCase().endsWith(".zip")
+    ) {
+      return new NextResponse(
+        "Caminho de backup inválido.",
+        { status: 400 }
+      );
+    }
+
+    const currentUser =
+      await getAuthenticatedUser();
+
+    if (!currentUser) {
+      return new NextResponse(
+        "Não autorizado.",
+        { status: 401 }
+      );
+    }
+
+    const backupOwnerId = segments[1];
+
+    if (
+      currentUser.id !== backupOwnerId &&
+      currentUser.role !== "ADMIN"
+    ) {
+      return new NextResponse(
+        "Você não possui permissão para acessar este backup.",
+        { status: 403 }
+      );
+    }
+
+    cleanupAllowed = true;
+  } else {
+    return new NextResponse(
+      "Tipo de arquivo não permitido.",
+      { status: 403 }
+    );
+  }
+
+  if (wantsCleanup && !cleanupAllowed) {
+    return new NextResponse(
+      "A exclusão automática não é permitida para este arquivo.",
+      { status: 403 }
+    );
+  }
+
+  const storageRoot = resolve(
+    process.cwd(),
+    "storage"
+  );
+
+  const filePath = resolve(
+    storageRoot,
+    storagePath
+  );
+
+  if (
+    !filePath.startsWith(
+      `${storageRoot}${sep}`
+    )
+  ) {
+    return new NextResponse(
+      "Caminho fora do armazenamento permitido.",
+      { status: 403 }
+    );
+  }
+
   try {
-     const buffer = await readFile(filePath);
-     const filename = pathParam.split('/').pop() || 'arquivo';
-     
-     if (cleanup === 'true') {
-         try {
-             await unlink(filePath);
-         } catch (err) {
-             console.error("Erro ao limpar arquivo temporário:", err);
-         }
-     }
+    const buffer = await readFile(filePath);
 
-     // 2. Define se vai mostrar na tela (inline) ou forçar download (attachment)
-     const dispositionType = isView ? "inline" : "attachment";
-     
-     // 3. Puxa o tipo correto baseado na extensão
-     const contentType = getContentType(filename);
+    if (wantsCleanup) {
+      try {
+        await unlink(filePath);
+      } catch (cleanupError) {
+        console.error(
+          "Erro ao excluir backup temporário:",
+          cleanupError
+        );
+      }
+    }
 
-     return new NextResponse(buffer, {
-         headers: {
-             "Content-Disposition": `${dispositionType}; filename="${filename}"`,
-             "Content-Type": contentType, // Agora o navegador sabe que é um PDF/Word/etc!
-         }
-     });
-  } catch (e) {
-      console.error("Erro no download:", e);
-      return new NextResponse("Arquivo não encontrado no servidor", { status: 404 });
+    const safeFilename = downloadName.replace(
+      /[\/\\\r\n"]/g,
+      "_"
+    );
+
+    const dispositionType =
+      storageCategory === "backups"
+        ? "attachment"
+        : wantsView
+          ? "inline"
+          : "attachment";
+
+    return new NextResponse(buffer, {
+      headers: {
+        "Content-Disposition":
+          `${dispositionType}; filename="${safeFilename}"; ` +
+          `filename*=UTF-8''${encodeURIComponent(safeFilename)}`,
+
+        "Content-Type":
+          getContentType(downloadName),
+
+        "Content-Length":
+          buffer.length.toString(),
+
+        "Cache-Control": isPublicFile
+          ? "public, max-age=3600"
+          : "private, no-store",
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Erro ao realizar download:",
+      error
+    );
+
+    return new NextResponse(
+      "Arquivo não encontrado no servidor.",
+      { status: 404 }
+    );
   }
 }
