@@ -1,18 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
-import { mkdir, unlink, writeFile } from "fs/promises";
-import { join } from "path";
 import { randomUUID } from "crypto";
 import { getServerSession } from "next-auth";
 
 import { prisma } from "../../lib/prisma";
 import { authOptions } from "../../lib/auth";
+import {
+  deleteFromWasabi,
+  uploadToWasabi,
+  WASABI_BUCKET_FILES,
+} from "../../lib/wasabi";
 
 export const runtime = "nodejs";
 
 const MAX_STORAGE_BYTES = 10 * 1024 * 1024 * 1024;
 
 export async function POST(req: NextRequest) {
-  const writtenFilePaths: string[] = [];
+  const uploadedObjectKeys: string[] = [];
   const createdMaterialIds: string[] = [];
 
   try {
@@ -154,16 +157,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const uploadDir = join(
-      process.cwd(),
-      "storage",
-      "uploads"
-    );
-
-    await mkdir(uploadDir, {
-      recursive: true,
-    });
-
     for (const file of files) {
       const rawFileName =
         file.name.split(/[\\/]/).pop() || "arquivo";
@@ -176,13 +169,20 @@ export async function POST(req: NextRequest) {
       const fileName =
         `${randomUUID()}-${sanitizedName}`;
 
-      const filePath = join(uploadDir, fileName);
+      const objectKey =
+        `uploads/${targetUserId}/${fileName}`;
 
       const bytes = await file.arrayBuffer();
       const buffer = Buffer.from(bytes);
 
-      await writeFile(filePath, buffer);
-      writtenFilePaths.push(filePath);
+      await uploadToWasabi({
+        bucket: WASABI_BUCKET_FILES,
+        key: objectKey,
+        body: buffer,
+        contentType: file.type || "application/octet-stream",
+      });
+
+      uploadedObjectKeys.push(objectKey);
 
       const extension =
         sanitizedName.includes(".")
@@ -196,7 +196,7 @@ export async function POST(req: NextRequest) {
         data: {
           title: file.name,
           type: extension,
-          fileUrl: `/uploads/${fileName}`,
+          fileUrl: `/${objectKey}`,
           size: file.size,
           userId: targetUserId,
           parentId,
@@ -216,7 +216,7 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     /*
      * Se algum arquivo do lote falhar, desfaz os registros
-     * e remove os arquivos que já haviam sido gravados.
+     * e remove os arquivos que já haviam sido enviados ao Wasabi.
      */
     if (createdMaterialIds.length > 0) {
       await prisma.material
@@ -236,8 +236,8 @@ export async function POST(req: NextRequest) {
     }
 
     await Promise.allSettled(
-      writtenFilePaths.map((filePath) =>
-        unlink(filePath)
+      uploadedObjectKeys.map((objectKey) =>
+        deleteFromWasabi(WASABI_BUCKET_FILES, objectKey)
       )
     );
 

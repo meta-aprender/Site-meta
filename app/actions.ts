@@ -1,5 +1,10 @@
 "use server";
 
+import {
+  deleteFromWasabi,
+  uploadToWasabi,
+  WASABI_BUCKET_FILES,
+} from "./lib/wasabi";
 import { prisma } from "./lib/prisma";
 import { revalidatePath } from "next/cache";
 import { writeFile, mkdir, unlink } from "fs/promises";
@@ -333,26 +338,30 @@ export async function deleteMaterial(id: string) {
     for (const child of children) {
       await deleteMaterial(child.id);
     }
-  } else if (item.fileUrl && item.type !== "LINK") {
-    const storageRoot = resolve(process.cwd(), "storage");
-
-    const relativePath = item.fileUrl
+    } else if (item.fileUrl && item.type !== "LINK") {
+    const objectKey = item.fileUrl
       .replace(/\\/g, "/")
       .replace(/^\/+/, "");
 
-    const filePath = resolve(storageRoot, relativePath);
+    const segments = objectKey.split("/");
 
-    if (!filePath.startsWith(`${storageRoot}${sep}`)) {
+    if (
+      !objectKey ||
+      objectKey.includes("\0") ||
+      segments.some(
+        (segment) =>
+          !segment ||
+          segment === "." ||
+          segment === ".."
+      )
+    ) {
       throw new Error("Caminho de arquivo inválido.");
     }
 
-    try {
-      await unlink(filePath);
-    } catch (error: any) {
-      if (error?.code !== "ENOENT") {
-        throw error;
-      }
-    }
+    await deleteFromWasabi(
+      WASABI_BUCKET_FILES,
+      objectKey
+    );
   }
 
   await prisma.material.delete({
@@ -983,7 +992,7 @@ export async function createBook(formData: FormData) {
     }
   }
 
-  const writtenPaths: string[] = [];
+  const uploadedObjectKeys: string[] = [];
 
   try {
     const coverExtension =
@@ -996,34 +1005,21 @@ export async function createBook(formData: FormData) {
     const coverName =
       `${randomUUID()}.${coverExtension}`;
 
-    const coverDirectory = join(
-      process.cwd(),
-      "storage",
-      "covers"
-    );
-
-    await mkdir(coverDirectory, {
-      recursive: true,
-    });
-
-    const coverPath = join(
-      coverDirectory,
-      coverName
-    );
-
     const coverBuffer = Buffer.from(
       await coverFile.arrayBuffer()
     );
 
-    await writeFile(
-      coverPath,
-      coverBuffer
-    );
-
-    writtenPaths.push(coverPath);
-
     const coverUrl =
       `covers/${coverName}`;
+
+    await uploadToWasabi({
+      bucket: WASABI_BUCKET_FILES,
+      key: coverUrl,
+      body: coverBuffer,
+      contentType: coverFile.type,
+    });
+
+    uploadedObjectKeys.push(coverUrl);
 
     let finalContentUrl = contentLink;
 
@@ -1034,36 +1030,22 @@ export async function createBook(formData: FormData) {
       const bookFileName =
         `${randomUUID()}.pdf`;
 
-      const booksDirectory = join(
-        process.cwd(),
-        "storage",
-        "books"
-      );
-
-      await mkdir(booksDirectory, {
-        recursive: true,
-      });
-
-      const bookFilePath = join(
-        booksDirectory,
-        bookFileName
-      );
-
       const fileBuffer = Buffer.from(
         await contentFile.arrayBuffer()
       );
 
-      await writeFile(
-        bookFilePath,
-        fileBuffer
-      );
-
-      writtenPaths.push(bookFilePath);
-
       finalContentUrl =
         `books/${bookFileName}`;
-    }
 
+      await uploadToWasabi({
+        bucket: WASABI_BUCKET_FILES,
+        key: finalContentUrl,
+        body: fileBuffer,
+        contentType: "application/pdf",
+      });
+
+      uploadedObjectKeys.push(finalContentUrl);
+    }
     await prisma.book.create({
       data: {
         title,
@@ -1084,8 +1066,11 @@ export async function createBook(formData: FormData) {
     };
   } catch (error) {
     await Promise.allSettled(
-      writtenPaths.map((filePath) =>
-        unlink(filePath)
+      uploadedObjectKeys.map((objectKey) =>
+        deleteFromWasabi(
+          WASABI_BUCKET_FILES,
+          objectKey
+        )
       )
     );
 
@@ -1101,7 +1086,7 @@ export async function createBook(formData: FormData) {
 }
 
 // --- 11. EDITAR LIVRO (APENAS TEXTOS E LINKS) ---
-export async function updateBook(formData: FormData) {
+  export async function updateBook(formData: FormData) {
   await requireAdmin();
 
   const id = formData.get("bookId") as string;

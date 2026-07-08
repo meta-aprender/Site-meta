@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readFile, unlink } from "fs/promises";
-import { basename, resolve, sep } from "path";
 import { getServerSession } from "next-auth";
 
 import { prisma } from "../../lib/prisma";
 import { authOptions } from "../../lib/auth";
+import {
+  deleteFromWasabi,
+  getFromWasabi,
+  WASABI_BUCKET_BACKUPS,
+  WASABI_BUCKET_FILES,
+} from "../../lib/wasabi";
 
 export const runtime = "nodejs";
 
@@ -44,6 +48,10 @@ function getContentType(filename: string) {
   }
 }
 
+function getFileNameFromPath(path: string) {
+  return path.split("/").pop() || "arquivo";
+}
+
 function normalizeStoragePath(rawPath: string) {
   const normalizedPath = rawPath
     .replace(/\\/g, "/")
@@ -70,6 +78,37 @@ function normalizeStoragePath(rawPath: string) {
   }
 
   return normalizedPath;
+}
+
+async function bodyToBuffer(body: unknown) {
+  if (!body) {
+    return Buffer.alloc(0);
+  }
+
+  if (body instanceof Uint8Array) {
+    return Buffer.from(body);
+  }
+
+  const maybeTransformBody = body as {
+    transformToByteArray?: () => Promise<Uint8Array>;
+  };
+
+  if (typeof maybeTransformBody.transformToByteArray === "function") {
+    const bytes = await maybeTransformBody.transformToByteArray();
+    return Buffer.from(bytes);
+  }
+
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of body as AsyncIterable<Uint8Array | Buffer | string>) {
+    chunks.push(
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(chunk)
+    );
+  }
+
+  return Buffer.concat(chunks);
 }
 
 async function getAuthenticatedUser() {
@@ -122,9 +161,10 @@ export async function GET(req: NextRequest) {
   const segments = storagePath.split("/");
   const storageCategory = segments[0];
 
-  let downloadName = basename(storagePath);
+  let downloadName = getFileNameFromPath(storagePath);
   let cleanupAllowed = false;
   let isPublicFile = false;
+  let bucket = WASABI_BUCKET_FILES;
 
   const pathCandidates = [
     storagePath,
@@ -136,7 +176,7 @@ export async function GET(req: NextRequest) {
    * somente o proprietário ou um administrador.
    */
   if (storageCategory === "uploads") {
-    if (segments.length !== 2) {
+    if (segments.length < 2) {
       return new NextResponse(
         "Caminho de material inválido.",
         { status: 400 }
@@ -293,6 +333,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
+    bucket = WASABI_BUCKET_BACKUPS;
     cleanupAllowed = true;
   } else {
     return new NextResponse(
@@ -308,33 +349,13 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const storageRoot = resolve(
-    process.cwd(),
-    "storage"
-  );
-
-  const filePath = resolve(
-    storageRoot,
-    storagePath
-  );
-
-  if (
-    !filePath.startsWith(
-      `${storageRoot}${sep}`
-    )
-  ) {
-    return new NextResponse(
-      "Caminho fora do armazenamento permitido.",
-      { status: 403 }
-    );
-  }
-
   try {
-    const buffer = await readFile(filePath);
+    const file = await getFromWasabi(bucket, storagePath);
+    const buffer = await bodyToBuffer(file.Body);
 
     if (wantsCleanup) {
       try {
-        await unlink(filePath);
+        await deleteFromWasabi(bucket, storagePath);
       } catch (cleanupError) {
         console.error(
           "Erro ao excluir backup temporário:",
@@ -379,7 +400,7 @@ export async function GET(req: NextRequest) {
     );
 
     return new NextResponse(
-      "Arquivo não encontrado no servidor.",
+      "Arquivo não encontrado no storage.",
       { status: 404 }
     );
   }
