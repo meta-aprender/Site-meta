@@ -2,7 +2,9 @@
 
 import {
   deleteFromWasabi,
+  getFromWasabi,
   uploadToWasabi,
+  WASABI_BUCKET_BACKUPS,
   WASABI_BUCKET_FILES,
 } from "./lib/wasabi";
 import { prisma } from "./lib/prisma";
@@ -409,6 +411,67 @@ export async function downloadBackup() {
     );
   };
 
+  const normalizeWasabiKey = (rawPath: string) => {
+    const objectKey = rawPath
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "");
+
+    const segments = objectKey.split("/");
+
+    if (
+      !objectKey ||
+      objectKey.includes("\0") ||
+      segments.some(
+        (segment) =>
+          !segment ||
+          segment === "." ||
+          segment === ".."
+      )
+    ) {
+      throw new Error("Caminho de arquivo inválido.");
+    }
+
+    return objectKey;
+  };
+
+  const bodyToBuffer = async (body: unknown) => {
+    if (!body) {
+      return Buffer.alloc(0);
+    }
+
+    if (body instanceof Uint8Array) {
+      return Buffer.from(body);
+    }
+
+    const maybeTransformBody = body as {
+      transformToByteArray?: () => Promise<Uint8Array>;
+    };
+
+    if (
+      typeof maybeTransformBody.transformToByteArray ===
+      "function"
+    ) {
+      const bytes =
+        await maybeTransformBody.transformToByteArray();
+
+      return Buffer.from(bytes);
+    }
+
+    const chunks: Buffer[] = [];
+
+    for await (const chunk of body as AsyncIterable<
+      Uint8Array | Buffer | string
+    >) {
+      chunks.push(
+        Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(chunk)
+      );
+    }
+
+    return Buffer.concat(chunks);
+  };
+
   const getZipPath = (
     item: (typeof allMaterials)[number],
     allItems: typeof allMaterials
@@ -432,11 +495,6 @@ export async function downloadBackup() {
     );
   };
 
-  const storageRoot = resolve(
-    process.cwd(),
-    "storage"
-  );
-
   for (const item of allMaterials) {
     if (
       item.type !== "FOLDER" &&
@@ -444,34 +502,31 @@ export async function downloadBackup() {
       item.fileUrl
     ) {
       try {
-        const relativeFilePath = item.fileUrl.replace(
-          /^[/\\]+/,
-          ""
+        const objectKey = normalizeWasabiKey(
+          item.fileUrl
         );
 
-        const filePath = resolve(
-          storageRoot,
-          relativeFilePath
+        const file = await getFromWasabi(
+          WASABI_BUCKET_FILES,
+          objectKey
         );
 
-        if (
-          !filePath.startsWith(
-            `${storageRoot}${sep}`
-          )
-        ) {
-          throw new Error(
-            "Caminho de arquivo inválido."
-          );
-        }
+        const fileBuffer = await bodyToBuffer(
+          file.Body
+        );
 
         const folderPathInsideZip = getZipPath(
           item,
           allMaterials
         );
 
-        zip.addLocalFile(
-          filePath,
-          folderPathInsideZip
+        const fileNameInsideZip =
+          folderPathInsideZip +
+          sanitizeZipSegment(item.title);
+
+        zip.addFile(
+          fileNameInsideZip,
+          fileBuffer
         );
       } catch (error) {
         console.error(
@@ -496,22 +551,19 @@ export async function downloadBackup() {
   const backupName =
     `${Date.now()}-${randomUUID()}.zip`;
 
-  const backupDirectory = join(
-    process.cwd(),
-    "storage",
-    "backups",
-    user.id
-  );
+  const backupKey =
+    `backups/${user.id}/${backupName}`;
 
-  await mkdir(backupDirectory, {
-    recursive: true,
+  const backupBuffer = zip.toBuffer();
+
+  await uploadToWasabi({
+    bucket: WASABI_BUCKET_BACKUPS,
+    key: backupKey,
+    body: backupBuffer,
+    contentType: "application/zip",
   });
 
-  await zip.writeZipPromise(
-    join(backupDirectory, backupName)
-  );
-
-  return `/backups/${user.id}/${backupName}`;
+  return `/${backupKey}`;
 }
 
 // --- AÇÕES ADMIN / OUTROS ---
@@ -862,21 +914,64 @@ export async function deleteBook(formData: FormData) {
   await requireAdmin();
 
   const bookId = formData.get("bookId") as string;
-  const book = await prisma.book.findUnique({ where: { id: bookId } });
-  if (!book) return;
 
-  // CORREÇÃO: Agora apagamos a capa da pasta STORAGE, não mais da public
+  if (!bookId) {
+    return;
+  }
+
+  const book = await prisma.book.findUnique({
+    where: {
+      id: bookId,
+    },
+  });
+
+  if (!book) {
+    return;
+  }
+
+  const normalizeWasabiKey = (rawPath: string) => {
+    const objectKey = rawPath
+      .replace(/\\/g, "/")
+      .replace(/^\/+/, "");
+
+    const segments = objectKey.split("/");
+
+    if (
+      !objectKey ||
+      objectKey.includes("\0") ||
+      segments.some(
+        (segment) =>
+          !segment ||
+          segment === "." ||
+          segment === ".."
+      )
+    ) {
+      throw new Error("Caminho de arquivo inválido.");
+    }
+
+    return objectKey;
+  };
+
   if (book.coverUrl) {
-    const coverPath = join(process.cwd(), "storage", book.coverUrl.replace(/^\//, ''));
-    try { await unlink(coverPath); } catch (e) { console.log("Capa não encontrada no disco"); }
-  }
-  
-  if (book.type === 'FILE' && book.contentUrl) {
-    const contentPath = join(process.cwd(), "storage", book.contentUrl.replace(/^\//, ''));
-    try { await unlink(contentPath); } catch (e) { console.log("PDF não encontrado no disco"); }
+    await deleteFromWasabi(
+      WASABI_BUCKET_FILES,
+      normalizeWasabiKey(book.coverUrl)
+    );
   }
 
-  await prisma.book.delete({ where: { id: bookId } });
+  if (book.type === "FILE" && book.contentUrl) {
+    await deleteFromWasabi(
+      WASABI_BUCKET_FILES,
+      normalizeWasabiKey(book.contentUrl)
+    );
+  }
+
+  await prisma.book.delete({
+    where: {
+      id: bookId,
+    },
+  });
+
   revalidatePath("/");
   revalidatePath("/admin/dashboard/books");
 }

@@ -13,9 +13,9 @@ export default function BackupButton() {
       // 1. Pede para o servidor gerar o ZIP (retorna o caminho: /backups/arquivo.zip)
       const urlPath = await downloadBackup();
       
-      // 2. Usa a API segura para baixar e manda o comando cleanup=true para apagar
+      // 2.2. Usa a API segura para baixar o backup
       // window.location.href força o download direto sem abrir aba em branco
-      window.location.href = `/api/download?path=${urlPath}&cleanup=true`;
+      window.location.href = `/api/download?path=${urlPath}`;
       
     } catch (error) {
       alert("Erro ao criar backup");
