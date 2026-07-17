@@ -6,6 +6,7 @@ import { authOptions } from "../../lib/auth";
 import {
   deleteFromWasabi,
   getFromWasabi,
+  getSignedDownloadUrl,
   WASABI_BUCKET_BACKUPS,
   WASABI_BUCKET_FILES,
 } from "../../lib/wasabi";
@@ -266,34 +267,49 @@ export async function GET(req: NextRequest) {
    * são públicos quando estiverem cadastrados.
    */
   else if (storageCategory === "books") {
-    if (segments.length !== 2) {
-      return new NextResponse(
-        "Caminho de livro inválido.",
-        { status: 400 }
-      );
-    }
-
-    const book = await prisma.book.findFirst({
-      where: {
-        OR: [
-          { contentUrl: storagePath },
-          { contentUrl: `/${storagePath}` },
-        ],
-      },
-      select: {
-        title: true,
-      },
-    });
-
-    if (!book) {
-      return new NextResponse(
-        "Livro não encontrado.",
-        { status: 404 }
-      );
-    }
-
-    isPublicFile = true;
+  if (segments.length !== 2) {
+    return new NextResponse(
+      "Caminho de livro inválido.",
+      { status: 400 }
+    );
   }
+
+  const book = await prisma.book.findFirst({
+    where: {
+      OR: [
+        { contentUrl: storagePath },
+        { contentUrl: `/${storagePath}` },
+      ],
+    },
+    select: {
+      title: true,
+    },
+  });
+
+  if (!book) {
+    return new NextResponse(
+      "Livro não encontrado.",
+      { status: 404 }
+    );
+  }
+
+  const originalExtension =
+    storagePath.split(".").pop();
+
+  downloadName = book.title;
+
+  if (
+    originalExtension &&
+    !downloadName
+      .toLowerCase()
+      .endsWith(`.${originalExtension.toLowerCase()}`)
+  ) {
+    downloadName =
+      `${downloadName}.${originalExtension}`;
+  }
+
+  isPublicFile = true;
+}
 
   /*
    * Backups:
@@ -348,6 +364,33 @@ export async function GET(req: NextRequest) {
       { status: 403 }
     );
   }
+  if (storageCategory === "books") {
+  try {
+    const signedUrl =
+      await getSignedDownloadUrl({
+        bucket,
+        key: storagePath,
+        filename: downloadName,
+        contentType:
+          getContentType(storagePath),
+        inline: wantsView,
+      });
+
+    return NextResponse.redirect(
+      signedUrl
+    );
+  } catch (error) {
+    console.error(
+      "Erro ao gerar link do livro:",
+      error
+    );
+
+    return new NextResponse(
+      "Não foi possível gerar o download do livro.",
+      { status: 500 }
+    );
+  }
+}
 
   try {
     const file = await getFromWasabi(bucket, storagePath);

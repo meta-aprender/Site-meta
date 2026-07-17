@@ -1,3 +1,5 @@
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
 import {
   S3Client,
   PutObjectCommand,
@@ -71,5 +73,49 @@ export async function deleteFromWasabi(bucket: string, key: string) {
       Bucket: bucket,
       Key: key,
     })
+  );
+}
+
+type SignedDownloadParams = {
+  bucket: string;
+  key: string;
+  filename: string;
+  contentType?: string;
+  inline?: boolean;
+};
+
+export async function getSignedDownloadUrl({
+  bucket,
+  key,
+  filename,
+  contentType = "application/octet-stream",
+  inline = false,
+}: SignedDownloadParams) {
+  const safeFilename = filename.replace(
+    /[\/\\\r\n"]/g,
+    "_"
+  );
+
+  const disposition = inline
+    ? "inline"
+    : "attachment";
+
+  const command = new GetObjectCommand({
+    Bucket: bucket,
+    Key: key,
+
+    ResponseContentDisposition:
+      `${disposition}; filename="${safeFilename}"; ` +
+      `filename*=UTF-8''${encodeURIComponent(safeFilename)}`,
+
+    ResponseContentType: contentType,
+  });
+
+  return getSignedUrl(
+    wasabiClient,
+    command,
+    {
+      expiresIn: 600,
+    }
   );
 }
