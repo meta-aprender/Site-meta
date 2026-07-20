@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomUUID } from "crypto";
 import { getServerSession } from "next-auth";
+import { canManageSpace } from "../../lib/space-permissions";
 
 import { prisma } from "../../lib/prisma";
 import { authOptions } from "../../lib/auth";
@@ -60,79 +61,86 @@ export async function POST(req: NextRequest) {
         ? null
         : rawParentId;
 
-    const requestedTargetUserId =
-      formData.get("targetUserId")?.toString().trim() || null;
+    const requestedSpaceId =
+  formData.get("spaceId")?.toString().trim() || null;
 
-    let targetUserId =
-      requestedTargetUserId || currentUser.id;
+if (!requestedSpaceId) {
+  return new NextResponse("Espaço não informado.", {
+    status: 400,
+  });
+}
 
-    /*
-     * Quando existe uma pasta, o dono do upload deve ser
-     * obrigatoriamente o mesmo dono da pasta.
-     */
-    if (parentId) {
-      const parent = await prisma.material.findUnique({
-        where: {
-          id: parentId,
-        },
-        select: {
-          userId: true,
-          type: true,
-        },
-      });
+let spaceId = requestedSpaceId;
 
-      if (!parent || parent.type !== "FOLDER") {
-        return new NextResponse("Pasta de destino inválida.", {
-          status: 400,
-        });
-      }
+/*
+ * Se o upload estiver sendo feito dentro de uma pasta,
+ * o espaço obrigatoriamente deve ser o mesmo da pasta.
+ */
+if (parentId) {
+  const parent = await prisma.material.findUnique({
+    where: {
+      id: parentId,
+    },
+    select: {
+      spaceId: true,
+      type: true,
+    },
+  });
 
-      if (
-        requestedTargetUserId &&
-        requestedTargetUserId !== parent.userId
-      ) {
-        return new NextResponse(
-          "O usuário informado não corresponde ao dono da pasta.",
-          { status: 400 }
-        );
-      }
-
-      targetUserId = parent.userId;
-    }
-
-    /*
-     * Usuários comuns só podem enviar para a própria conta.
-     * Apenas administradores podem enviar para outro usuário.
-     */
-    if (
-      targetUserId !== currentUser.id &&
-      currentUser.role !== "ADMIN"
-    ) {
-      return new NextResponse(
-        "Você não possui permissão para modificar esta pasta.",
-        { status: 403 }
-      );
-    }
-
-    const targetUser = await prisma.user.findUnique({
-      where: {
-        id: targetUserId,
-      },
-      select: {
-        id: true,
-      },
+  if (!parent || parent.type !== "FOLDER") {
+    return new NextResponse("Pasta de destino inválida.", {
+      status: 400,
     });
+  }
 
-    if (!targetUser) {
-      return new NextResponse(
-        "Usuário de destino não encontrado.",
-        { status: 404 }
-      );
-    }
+  if (!parent.spaceId) {
+    return new NextResponse(
+      "Esta pasta pertence à estrutura antiga.",
+      { status: 400 }
+    );
+  }
+
+  if (parent.spaceId !== requestedSpaceId) {
+    return new NextResponse(
+      "A pasta não pertence ao espaço informado.",
+      { status: 400 }
+    );
+  }
+
+  spaceId = parent.spaceId;
+}
+
+const space = await prisma.space.findUnique({
+  where: {
+    id: spaceId,
+  },
+  select: {
+    id: true,
+    active: true,
+  },
+});
+
+if (!space || !space.active) {
+  return new NextResponse("Espaço não encontrado.", {
+    status: 404,
+  });
+}
+
+const hasAccess = await canManageSpace(
+  currentUser,
+  spaceId
+);
+
+if (!hasAccess) {
+  return new NextResponse(
+    "Você não possui permissão para gerenciar este espaço.",
+    { status: 403 }
+  );
+}
 
     const storageAggregation = await prisma.material.aggregate({
       where: {
-        userId: targetUserId,
+        userId: spaceId,
       },
       _sum: {
         size: true,
@@ -170,7 +178,7 @@ export async function POST(req: NextRequest) {
         `${randomUUID()}-${sanitizedName}`;
 
       const objectKey =
-        `uploads/${targetUserId}/${fileName}`;
+        `spaces/${spaceId}/${fileName}`;
 
       const bytes = await file.arrayBuffer();
       const buffer = Buffer.from(bytes);
@@ -198,7 +206,8 @@ export async function POST(req: NextRequest) {
           type: extension,
           fileUrl: `/${objectKey}`,
           size: file.size,
-          userId: targetUserId,
+          userId: currentUser.id,
+          spaceId,
           parentId,
         },
         select: {

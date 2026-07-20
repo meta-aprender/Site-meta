@@ -17,7 +17,11 @@ function formatBytes(bytes: number) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
 
-export default function InteractiveFileList({ materials, allFolders, viewUserId }: any) {
+export default function InteractiveFileList({
+  materials,
+  allFolders,
+  spaceId,
+}: any) {
   // Estado que controla qual arquivo está selecionado para o preview
   const [selectedFile, setSelectedFile] = useState<any>(null);
 
@@ -44,7 +48,7 @@ export default function InteractiveFileList({ materials, allFolders, viewUserId 
                   <div className="truncate pr-2 w-full">
                       {item.type === 'FOLDER' ? (
                           <Link 
-                              href={`/admin/dashboard?folder=${item.id}${viewUserId ? `&viewUser=${viewUserId}` : ""}`} 
+                              href={`/admin/dashboard?space=${spaceId}&folder=${item.id}`} 
                               className="text-white font-bold hover:underline block truncate text-sm"
                           >
                               {item.title}

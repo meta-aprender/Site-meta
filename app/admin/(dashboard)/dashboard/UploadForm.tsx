@@ -7,7 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 const MAX_FILE_SIZE = 45 * 1024 * 1024; // 45 MB em bytes
 
-export default function UploadForm({ parentId, targetUserId }: { parentId: string | null, targetUserId: string }) {
+export default function UploadForm({ parentId,  spaceId,}: {parentId: string | null;spaceId: string;}) {
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [progress, setProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -55,7 +55,7 @@ export default function UploadForm({ parentId, targetUserId }: { parentId: strin
     const formData = new FormData();
     Array.from(selectedFiles).forEach(file => formData.append("files", file));
     formData.append("parentId", parentId || "");
-    formData.append("targetUserId", targetUserId);
+    formData.append("spaceId", spaceId);  
 
     setIsUploading(true);
     setProgress(0);

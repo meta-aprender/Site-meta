@@ -8,7 +8,7 @@ export default function DeleteUserButton({ userId }: { userId: string }) {
     <form 
       action={deleteUser}
       onSubmit={(e) => {
-        if (!confirm("Tem certeza absoluta? Isso apagará o usuário e TODOS os arquivos dele permanentemente.")) {
+        if (!confirm("Tem certeza que deseja excluir este usuário? Os materiais publicados nos espaços serão preservados.")) {
           e.preventDefault(); // Cancela o envio se o usuário clicar em "Cancelar"
         }
       }}
