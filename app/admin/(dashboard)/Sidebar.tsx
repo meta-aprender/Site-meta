@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { signOut } from "next-auth/react";
-import { LayoutDashboard, Users, LogOut, Settings, Menu, X, BookOpen } from "lucide-react";
+import { LayoutGrid, LayoutDashboard, Users, LogOut, Settings, Menu, X, BookOpen } from "lucide-react";
 
 export default function Sidebar({ 
   usagePercent, 
@@ -24,6 +24,7 @@ export default function Sidebar({
     { name: "Usuários", icon: Users, href: "/admin/users", show: isAdmin },
     { name: "Catálogo de Livros", icon: BookOpen, href: "/admin/books", show: isAdmin }, // <-- NOVA ABA
     { name: "Configurações", icon: Settings, href: "/admin/settings", show: true },
+    {  name: "Espaços",  icon: LayoutGrid,  href: "/admin/spaces",  show: isAdmin,},
   ].filter(item => item.show); // Remove os itens que o usuário não pode ver
 
   return (

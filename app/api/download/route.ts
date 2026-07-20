@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 
 import { prisma } from "../../lib/prisma";
 import { authOptions } from "../../lib/auth";
+
 import {
   deleteFromWasabi,
   getFromWasabi,
@@ -14,36 +15,52 @@ import {
 export const runtime = "nodejs";
 
 function getContentType(filename: string) {
-  const extension = filename.split(".").pop()?.toLowerCase();
+  const extension = filename
+    .split(".")
+    .pop()
+    ?.toLowerCase();
 
   switch (extension) {
     case "pdf":
       return "application/pdf";
+
     case "doc":
       return "application/msword";
+
     case "docx":
       return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
     case "xls":
       return "application/vnd.ms-excel";
+
     case "xlsx":
       return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
     case "ppt":
       return "application/vnd.ms-powerpoint";
+
     case "pptx":
       return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
     case "png":
       return "image/png";
+
     case "jpg":
     case "jpeg":
       return "image/jpeg";
+
     case "gif":
       return "image/gif";
+
     case "webp":
       return "image/webp";
+
     case "zip":
       return "application/zip";
+
     case "txt":
       return "text/plain; charset=utf-8";
+
     default:
       return "application/octet-stream";
   }
@@ -65,7 +82,8 @@ function normalizeStoragePath(rawPath: string) {
     return null;
   }
 
-  const segments = normalizedPath.split("/");
+  const segments =
+    normalizedPath.split("/");
 
   if (
     segments.some(
@@ -81,7 +99,9 @@ function normalizeStoragePath(rawPath: string) {
   return normalizedPath;
 }
 
-async function bodyToBuffer(body: unknown) {
+async function bodyToBuffer(
+  body: unknown
+) {
   if (!body) {
     return Buffer.alloc(0);
   }
@@ -90,18 +110,30 @@ async function bodyToBuffer(body: unknown) {
     return Buffer.from(body);
   }
 
-  const maybeTransformBody = body as {
-    transformToByteArray?: () => Promise<Uint8Array>;
-  };
+  const maybeTransformBody =
+    body as {
+      transformToByteArray?: () =>
+        Promise<Uint8Array>;
+    };
 
-  if (typeof maybeTransformBody.transformToByteArray === "function") {
-    const bytes = await maybeTransformBody.transformToByteArray();
+  if (
+    typeof maybeTransformBody
+      .transformToByteArray === "function"
+  ) {
+    const bytes =
+      await maybeTransformBody
+        .transformToByteArray();
+
     return Buffer.from(bytes);
   }
 
   const chunks: Buffer[] = [];
 
-  for await (const chunk of body as AsyncIterable<Uint8Array | Buffer | string>) {
+  for await (
+    const chunk of body as AsyncIterable<
+      Uint8Array | Buffer | string
+    >
+  ) {
     chunks.push(
       Buffer.isBuffer(chunk)
         ? chunk
@@ -113,7 +145,10 @@ async function bodyToBuffer(body: unknown) {
 }
 
 async function getAuthenticatedUser() {
-  const session = await getServerSession(authOptions);
+  const session =
+    await getServerSession(
+      authOptions
+    );
 
   if (!session?.user?.email) {
     return null;
@@ -123,6 +158,7 @@ async function getAuthenticatedUser() {
     where: {
       email: session.user.email,
     },
+
     select: {
       id: true,
       role: true,
@@ -130,22 +166,30 @@ async function getAuthenticatedUser() {
   });
 }
 
-export async function GET(req: NextRequest) {
+export async function GET(
+  req: NextRequest
+) {
   const rawPath =
-    req.nextUrl.searchParams.get("path");
+    req.nextUrl.searchParams.get(
+      "path"
+    );
 
   const wantsCleanup =
-    req.nextUrl.searchParams.get("cleanup") ===
-    "true";
+    req.nextUrl.searchParams.get(
+      "cleanup"
+    ) === "true";
 
   const wantsView =
-    req.nextUrl.searchParams.get("view") ===
-    "true";
+    req.nextUrl.searchParams.get(
+      "view"
+    ) === "true";
 
   if (!rawPath) {
     return new NextResponse(
       "Caminho não informado.",
-      { status: 400 }
+      {
+        status: 400,
+      }
     );
   }
 
@@ -155,17 +199,29 @@ export async function GET(req: NextRequest) {
   if (!storagePath) {
     return new NextResponse(
       "Caminho inválido.",
-      { status: 400 }
+      {
+        status: 400,
+      }
     );
   }
 
-  const segments = storagePath.split("/");
-  const storageCategory = segments[0];
+  const segments =
+    storagePath.split("/");
 
-  let downloadName = getFileNameFromPath(storagePath);
+  const storageCategory =
+    segments[0];
+
+  let downloadName =
+    getFileNameFromPath(
+      storagePath
+    );
+
   let cleanupAllowed = false;
+
   let isPublicFile = false;
-  let bucket = WASABI_BUCKET_FILES;
+
+  let bucket =
+    WASABI_BUCKET_FILES;
 
   const pathCandidates = [
     storagePath,
@@ -173,14 +229,22 @@ export async function GET(req: NextRequest) {
   ];
 
   /*
-   * Materiais enviados pelos usuários:
-   * somente o proprietário ou um administrador.
+   * ==========================================================
+   * UPLOADS ANTIGOS
+   * ==========================================================
+   *
+   * Somente o proprietário original
+   * ou um administrador.
    */
-  if (storageCategory === "uploads") {
+  if (
+    storageCategory === "uploads"
+  ) {
     if (segments.length < 2) {
       return new NextResponse(
         "Caminho de material inválido.",
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
@@ -190,7 +254,9 @@ export async function GET(req: NextRequest) {
     if (!currentUser) {
       return new NextResponse(
         "Não autorizado.",
-        { status: 401 }
+        {
+          status: 401,
+        }
       );
     }
 
@@ -201,6 +267,7 @@ export async function GET(req: NextRequest) {
             in: pathCandidates,
           },
         },
+
         select: {
           title: true,
           userId: true,
@@ -210,52 +277,76 @@ export async function GET(req: NextRequest) {
     if (!material) {
       return new NextResponse(
         "Arquivo não encontrado.",
-        { status: 404 }
+        {
+          status: 404,
+        }
       );
     }
 
     if (
-      material.userId !== currentUser.id &&
+      material.userId !==
+        currentUser.id &&
       currentUser.role !== "ADMIN"
     ) {
       return new NextResponse(
         "Você não possui permissão para acessar este arquivo.",
-        { status: 403 }
+        {
+          status: 403,
+        }
       );
     }
 
-    downloadName = material.title;
+    downloadName =
+      material.title;
   }
 
   /*
-   * Capas de livros:
-   * podem ser exibidas no catálogo público,
-   * mas precisam existir no banco.
+   * ==========================================================
+   * CAPAS DOS LIVROS
+   * ==========================================================
+   *
+   * Públicas, desde que estejam
+   * cadastradas no banco.
    */
-  else if (storageCategory === "covers") {
+  else if (
+    storageCategory === "covers"
+  ) {
     if (segments.length !== 2) {
       return new NextResponse(
         "Caminho de capa inválido.",
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
-    const book = await prisma.book.findFirst({
-      where: {
-        OR: [
-          { coverUrl: storagePath },
-          { coverUrl: `/${storagePath}` },
-        ],
-      },
-      select: {
-        id: true,
-      },
-    });
+    const book =
+      await prisma.book.findFirst({
+        where: {
+          OR: [
+            {
+              coverUrl:
+                storagePath,
+            },
+
+            {
+              coverUrl:
+                `/${storagePath}`,
+            },
+          ],
+        },
+
+        select: {
+          id: true,
+        },
+      });
 
     if (!book) {
       return new NextResponse(
         "Capa não encontrada.",
-        { status: 404 }
+        {
+          status: 404,
+        }
       );
     }
 
@@ -263,67 +354,177 @@ export async function GET(req: NextRequest) {
   }
 
   /*
-   * Arquivos de livros:
-   * são públicos quando estiverem cadastrados.
+   * ==========================================================
+   * LIVROS
+   * ==========================================================
+   *
+   * Públicos quando cadastrados
+   * no catálogo.
    */
-  else if (storageCategory === "books") {
-  if (segments.length !== 2) {
-    return new NextResponse(
-      "Caminho de livro inválido.",
-      { status: 400 }
-    );
-  }
-
-  const book = await prisma.book.findFirst({
-    where: {
-      OR: [
-        { contentUrl: storagePath },
-        { contentUrl: `/${storagePath}` },
-      ],
-    },
-    select: {
-      title: true,
-    },
-  });
-
-  if (!book) {
-    return new NextResponse(
-      "Livro não encontrado.",
-      { status: 404 }
-    );
-  }
-
-  const originalExtension =
-    storagePath.split(".").pop();
-
-  downloadName = book.title;
-
-  if (
-    originalExtension &&
-    !downloadName
-      .toLowerCase()
-      .endsWith(`.${originalExtension.toLowerCase()}`)
+  else if (
+    storageCategory === "books"
   ) {
-    downloadName =
-      `${downloadName}.${originalExtension}`;
-  }
+    if (segments.length !== 2) {
+      return new NextResponse(
+        "Caminho de livro inválido.",
+        {
+          status: 400,
+        }
+      );
+    }
 
-  isPublicFile = true;
-}
+    const book =
+      await prisma.book.findFirst({
+        where: {
+          OR: [
+            {
+              contentUrl:
+                storagePath,
+            },
+
+            {
+              contentUrl:
+                `/${storagePath}`,
+            },
+          ],
+        },
+
+        select: {
+          title: true,
+        },
+      });
+
+    if (!book) {
+      return new NextResponse(
+        "Livro não encontrado.",
+        {
+          status: 404,
+        }
+      );
+    }
+
+    const originalExtension =
+      storagePath
+        .split(".")
+        .pop();
+
+    downloadName =
+      book.title;
+
+    if (
+      originalExtension &&
+      !downloadName
+        .toLowerCase()
+        .endsWith(
+          `.${originalExtension.toLowerCase()}`
+        )
+    ) {
+      downloadName =
+        `${downloadName}.${originalExtension}`;
+    }
+
+    isPublicFile = true;
+  }
 
   /*
-   * Backups:
-   * somente o proprietário ou um administrador.
-   * Apenas backups podem usar cleanup=true.
+   * ==========================================================
+   * MATERIAIS DOS ESPAÇOS
+   * ==========================================================
+   *
+   * Públicos quando:
+   *
+   * 1. o material pertence a um espaço;
+   * 2. o espaço está ativo.
    */
-  else if (storageCategory === "backups") {
+  else if (
+    storageCategory === "spaces"
+  ) {
+    if (segments.length < 3) {
+      return new NextResponse(
+        "Caminho de material inválido.",
+        {
+          status: 400,
+        }
+      );
+    }
+
+    const material =
+      await prisma.material.findFirst({
+        where: {
+          fileUrl: {
+            in: pathCandidates,
+          },
+
+          spaceId: {
+            not: null,
+          },
+
+          space: {
+            is: {
+              active: true,
+            },
+          },
+        },
+
+        select: {
+          title: true,
+        },
+      });
+
+    if (!material) {
+      return new NextResponse(
+        "Material não encontrado.",
+        {
+          status: 404,
+        }
+      );
+    }
+
+    downloadName =
+      material.title;
+
+    const originalExtension =
+      storagePath
+        .split(".")
+        .pop();
+
+    if (
+      originalExtension &&
+      !downloadName
+        .toLowerCase()
+        .endsWith(
+          `.${originalExtension.toLowerCase()}`
+        )
+    ) {
+      downloadName =
+        `${downloadName}.${originalExtension}`;
+    }
+
+    isPublicFile = true;
+  }
+
+  /*
+   * ==========================================================
+   * BACKUPS
+   * ==========================================================
+   *
+   * Somente o proprietário
+   * ou um administrador.
+   */
+  else if (
+    storageCategory === "backups"
+  ) {
     if (
       segments.length !== 3 ||
-      !segments[2].toLowerCase().endsWith(".zip")
+      !segments[2]
+        .toLowerCase()
+        .endsWith(".zip")
     ) {
       return new NextResponse(
         "Caminho de backup inválido.",
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
@@ -333,73 +534,148 @@ export async function GET(req: NextRequest) {
     if (!currentUser) {
       return new NextResponse(
         "Não autorizado.",
-        { status: 401 }
+        {
+          status: 401,
+        }
       );
     }
 
-    const backupOwnerId = segments[1];
+    const backupOwnerId =
+      segments[1];
 
     if (
-      currentUser.id !== backupOwnerId &&
+      currentUser.id !==
+        backupOwnerId &&
       currentUser.role !== "ADMIN"
     ) {
       return new NextResponse(
         "Você não possui permissão para acessar este backup.",
-        { status: 403 }
+        {
+          status: 403,
+        }
       );
     }
 
-    bucket = WASABI_BUCKET_BACKUPS;
+    bucket =
+      WASABI_BUCKET_BACKUPS;
+
     cleanupAllowed = true;
-  } else {
+  }
+
+  /*
+   * Qualquer outro caminho
+   * é bloqueado.
+   */
+  else {
     return new NextResponse(
       "Tipo de arquivo não permitido.",
-      { status: 403 }
+      {
+        status: 403,
+      }
     );
   }
 
-  if (wantsCleanup && !cleanupAllowed) {
+  /*
+   * Somente backups temporários
+   * podem solicitar cleanup=true.
+   */
+  if (
+    wantsCleanup &&
+    !cleanupAllowed
+  ) {
     return new NextResponse(
       "A exclusão automática não é permitida para este arquivo.",
-      { status: 403 }
+      {
+        status: 403,
+      }
     );
   }
-  if (storageCategory === "books") {
+
+  /*
+   * ==========================================================
+   * LIVROS E MATERIAIS DOS ESPAÇOS
+   * ==========================================================
+   *
+   * Geramos uma URL temporária do Wasabi.
+   *
+   * Assim o arquivo NÃO passa inteiro
+   * pelo servidor da KingHost.
+   */
+  if (
+    storageCategory === "books" ||
+    storageCategory === "spaces"
+  ) {
+    try {
+      const signedUrl =
+        await getSignedDownloadUrl({
+          bucket,
+
+          key:
+            storagePath,
+
+          filename:
+            downloadName,
+
+          contentType:
+            getContentType(
+              storagePath
+            ),
+
+          inline:
+            wantsView,
+        });
+
+      return NextResponse.redirect(
+        signedUrl
+      );
+    } catch (error) {
+      console.error(
+        "Erro ao gerar link temporário do arquivo:",
+        error
+      );
+
+      return new NextResponse(
+        "Não foi possível gerar o acesso ao arquivo.",
+        {
+          status: 500,
+        }
+      );
+    }
+  }
+
+  /*
+   * ==========================================================
+   * DEMAIS ARQUIVOS
+   * ==========================================================
+   *
+   * Mantemos o comportamento antigo
+   * para uploads, capas e backups.
+   */
   try {
-    const signedUrl =
-      await getSignedDownloadUrl({
+    const file =
+      await getFromWasabi(
         bucket,
-        key: storagePath,
-        filename: downloadName,
-        contentType:
-          getContentType(storagePath),
-        inline: wantsView,
-      });
+        storagePath
+      );
 
-    return NextResponse.redirect(
-      signedUrl
-    );
-  } catch (error) {
-    console.error(
-      "Erro ao gerar link do livro:",
-      error
-    );
+    const buffer =
+      await bodyToBuffer(
+        file.Body
+      );
 
-    return new NextResponse(
-      "Não foi possível gerar o download do livro.",
-      { status: 500 }
-    );
-  }
-}
-
-  try {
-    const file = await getFromWasabi(bucket, storagePath);
-    const buffer = await bodyToBuffer(file.Body);
-
+    /*
+     * Backups temporários podem ser
+     * apagados depois do download.
+     */
     if (wantsCleanup) {
       try {
-        await deleteFromWasabi(bucket, storagePath);
-      } catch (cleanupError) {
+        await deleteFromWasabi(
+          bucket,
+          storagePath
+        );
+      } catch (
+        cleanupError
+      ) {
         console.error(
           "Erro ao excluir backup temporário:",
           cleanupError
@@ -407,35 +683,45 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    const safeFilename = downloadName.replace(
-      /[\/\\\r\n"]/g,
-      "_"
-    );
+    const safeFilename =
+      downloadName.replace(
+        /[\/\\\r\n"]/g,
+        "_"
+      );
 
     const dispositionType =
-      storageCategory === "backups"
+      storageCategory ===
+      "backups"
         ? "attachment"
         : wantsView
           ? "inline"
           : "attachment";
 
-    return new NextResponse(buffer, {
-      headers: {
-        "Content-Disposition":
-          `${dispositionType}; filename="${safeFilename}"; ` +
-          `filename*=UTF-8''${encodeURIComponent(safeFilename)}`,
+    return new NextResponse(
+      buffer,
+      {
+        headers: {
+          "Content-Disposition":
+            `${dispositionType}; filename="${safeFilename}"; ` +
+            `filename*=UTF-8''${encodeURIComponent(
+              safeFilename
+            )}`,
 
-        "Content-Type":
-          getContentType(downloadName),
+          "Content-Type":
+            getContentType(
+              downloadName
+            ),
 
-        "Content-Length":
-          buffer.length.toString(),
+          "Content-Length":
+            buffer.length.toString(),
 
-        "Cache-Control": isPublicFile
-          ? "public, max-age=3600"
-          : "private, no-store",
-      },
-    });
+          "Cache-Control":
+            isPublicFile
+              ? "public, max-age=3600"
+              : "private, no-store",
+        },
+      }
+    );
   } catch (error) {
     console.error(
       "Erro ao realizar download:",
@@ -444,7 +730,9 @@ export async function GET(req: NextRequest) {
 
     return new NextResponse(
       "Arquivo não encontrado no storage.",
-      { status: 404 }
+      {
+        status: 404,
+      }
     );
   }
 }

@@ -1676,3 +1676,343 @@ export async function createBook(formData: FormData) {
   revalidatePath("/");
   revalidatePath("/admin/dashboard/books");
 }
+// ============================================================
+// GESTÃO DE ESPAÇOS
+// ============================================================
+
+function generateSpaceSlug(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+async function generateUniqueSpaceSlug(name: string) {
+  const baseSlug =
+    generateSpaceSlug(name) ||
+    `espaco-${randomUUID().slice(0, 8)}`;
+
+  let slug = baseSlug;
+  let counter = 2;
+
+  while (
+    await prisma.space.findUnique({
+      where: {
+        slug,
+      },
+      select: {
+        id: true,
+      },
+    })
+  ) {
+    slug = `${baseSlug}-${counter}`;
+    counter++;
+  }
+
+  return slug;
+}
+
+export async function createSpace(
+  formData: FormData
+) {
+  await requireAdmin();
+
+  const name =
+    formData.get("name")?.toString().trim() || "";
+
+  const imageUrl =
+    formData.get("imageUrl")?.toString().trim() || null;
+
+  if (!name) {
+    throw new Error(
+      "O nome do espaço é obrigatório."
+    );
+  }
+
+  const slug =
+    await generateUniqueSpaceSlug(name);
+
+  const lastSpace =
+    await prisma.space.aggregate({
+      _max: {
+        displayOrder: true,
+      },
+    });
+
+  const displayOrder =
+    (lastSpace._max.displayOrder || 0) + 1;
+
+  await prisma.space.create({
+    data: {
+      name,
+      slug,
+      imageUrl,
+      displayOrder,
+      active: true,
+    },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/spaces");
+  revalidatePath("/admin/dashboard");
+  revalidatePath("/admin/users");
+}
+
+export async function updateSpace(
+  formData: FormData
+) {
+  await requireAdmin();
+
+  const spaceId =
+    formData.get("spaceId")?.toString() || "";
+
+  const name =
+    formData.get("name")?.toString().trim() || "";
+
+  const imageUrl =
+    formData.get("imageUrl")?.toString().trim() || null;
+
+  if (!spaceId) {
+    throw new Error(
+      "Espaço não informado."
+    );
+  }
+
+  if (!name) {
+    throw new Error(
+      "O nome do espaço é obrigatório."
+    );
+  }
+
+  const space =
+    await prisma.space.findUnique({
+      where: {
+        id: spaceId,
+      },
+    });
+
+  if (!space) {
+    throw new Error(
+      "Espaço não encontrado."
+    );
+  }
+
+  await prisma.space.update({
+    where: {
+      id: spaceId,
+    },
+    data: {
+      name,
+      imageUrl,
+    },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/spaces");
+  revalidatePath("/admin/dashboard");
+  revalidatePath("/admin/users");
+}
+
+export async function toggleSpaceStatus(
+  formData: FormData
+) {
+  await requireAdmin();
+
+  const spaceId =
+    formData.get("spaceId")?.toString() || "";
+
+  if (!spaceId) {
+    throw new Error(
+      "Espaço não informado."
+    );
+  }
+
+  const space =
+    await prisma.space.findUnique({
+      where: {
+        id: spaceId,
+      },
+      select: {
+        active: true,
+      },
+    });
+
+  if (!space) {
+    throw new Error(
+      "Espaço não encontrado."
+    );
+  }
+
+  await prisma.space.update({
+    where: {
+      id: spaceId,
+    },
+    data: {
+      active: !space.active,
+    },
+  });
+
+  revalidatePath("/");
+  revalidatePath("/admin/spaces");
+  revalidatePath("/admin/dashboard");
+  revalidatePath("/admin/users");
+}
+
+export async function moveSpaceOrder(
+  formData: FormData
+) {
+  await requireAdmin();
+
+  const spaceId =
+    formData.get("spaceId")?.toString() || "";
+
+  const direction =
+    formData.get("direction")?.toString();
+
+  if (
+    !spaceId ||
+    (direction !== "up" &&
+      direction !== "down")
+  ) {
+    throw new Error(
+      "Movimentação inválida."
+    );
+  }
+
+  const spaces =
+    await prisma.space.findMany({
+      orderBy: [
+        {
+          displayOrder: "asc",
+        },
+        {
+          name: "asc",
+        },
+      ],
+      select: {
+        id: true,
+        displayOrder: true,
+      },
+    });
+
+  const currentIndex =
+    spaces.findIndex(
+      (space) => space.id === spaceId
+    );
+
+  if (currentIndex === -1) {
+    throw new Error(
+      "Espaço não encontrado."
+    );
+  }
+
+  const targetIndex =
+    direction === "up"
+      ? currentIndex - 1
+      : currentIndex + 1;
+
+  if (
+    targetIndex < 0 ||
+    targetIndex >= spaces.length
+  ) {
+    return;
+  }
+
+  const currentSpace =
+    spaces[currentIndex];
+
+  const targetSpace =
+    spaces[targetIndex];
+
+  await prisma.$transaction([
+    prisma.space.update({
+      where: {
+        id: currentSpace.id,
+      },
+      data: {
+        displayOrder:
+          targetSpace.displayOrder,
+      },
+    }),
+
+    prisma.space.update({
+      where: {
+        id: targetSpace.id,
+      },
+      data: {
+        displayOrder:
+          currentSpace.displayOrder,
+      },
+    }),
+  ]);
+
+  revalidatePath("/");
+  revalidatePath("/admin/spaces");
+  revalidatePath("/admin/dashboard");
+}
+// ============================================================
+// NAVEGAÇÃO PÚBLICA DOS ESPAÇOS
+// ============================================================
+
+export async function getPublicFolderContents(
+  folderId: string
+) {
+  if (!folderId) {
+    throw new Error("Pasta não informada.");
+  }
+
+  /*
+   * A pasta precisa:
+   *
+   * 1. existir;
+   * 2. ser uma pasta;
+   * 3. pertencer a um espaço;
+   * 4. estar em um espaço ativo.
+   */
+  const folder =
+    await prisma.material.findFirst({
+      where: {
+        id: folderId,
+        type: "FOLDER",
+
+        spaceId: {
+          not: null,
+        },
+
+        space: {
+          is: {
+            active: true,
+          },
+        },
+      },
+
+      select: {
+        id: true,
+        spaceId: true,
+      },
+    });
+
+  if (!folder || !folder.spaceId) {
+    throw new Error(
+      "Pasta não encontrada."
+    );
+  }
+
+  /*
+   * Retornamos somente itens pertencentes
+   * ao mesmo espaço da pasta.
+   */
+  return prisma.material.findMany({
+    where: {
+      parentId: folder.id,
+      spaceId: folder.spaceId,
+    },
+
+    orderBy: {
+      title: "asc",
+    },
+  });
+}
