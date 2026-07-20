@@ -435,37 +435,103 @@ export async function renameMaterial(formData: FormData) {
 }
 
 // --- 5. EXCLUIR USUÁRIO ---
-export async function deleteUser(formData: FormData) {
-  const currentUser = await requireAdmin();
+export async function deleteUser(
+  formData: FormData
+) {
+  const currentUser =
+    await requireAdmin();
 
-  const userIdToDelete = formData.get("userId") as string;
+  const userIdToDelete =
+    formData.get("userId")?.toString() || "";
 
   if (!userIdToDelete) {
-    throw new Error("Usuário não informado.");
+    throw new Error(
+      "Usuário não informado."
+    );
   }
 
-  if (userIdToDelete === currentUser.id) {
-    throw new Error("Você não pode excluir a própria conta.");
+  if (
+    userIdToDelete === currentUser.id
+  ) {
+    throw new Error(
+      "Você não pode excluir a própria conta."
+    );
   }
 
-  const userToDelete = await prisma.user.findUnique({
-    where: { id: userIdToDelete },
-  });
+  const userToDelete =
+    await prisma.user.findUnique({
+      where: {
+        id: userIdToDelete,
+      },
+    });
 
   if (!userToDelete) {
-    throw new Error("Usuário não encontrado.");
+    throw new Error(
+      "Usuário não encontrado."
+    );
   }
 
-  const userMaterials = await prisma.material.findMany({
-    where: { userId: userIdToDelete },
+  /*
+   * NOVA ESTRUTURA:
+   *
+   * Um arquivo pertence ao ESPAÇO.
+   * O userId registra apenas quem criou.
+   *
+   * Portanto, ao excluir um usuário,
+   * os materiais dos espaços NÃO podem sumir.
+   *
+   * Transferimos a autoria técnica para
+   * o administrador que está fazendo a exclusão.
+   */
+  await prisma.material.updateMany({
+    where: {
+      userId: userIdToDelete,
+      spaceId: {
+        not: null,
+      },
+    },
+    data: {
+      userId: currentUser.id,
+    },
   });
 
-  for (const item of userMaterials) {
+  /*
+   * ESTRUTURA ANTIGA:
+   *
+   * Materiais sem spaceId ainda pertencem
+   * diretamente ao usuário antigo.
+   *
+   * Buscamos apenas os itens raiz,
+   * porque deleteMaterial já apaga
+   * as subpastas recursivamente.
+   */
+  const legacyRootMaterials =
+    await prisma.material.findMany({
+      where: {
+        userId: userIdToDelete,
+        spaceId: null,
+        parentId: null,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+  for (
+    const item of legacyRootMaterials
+  ) {
     await deleteMaterial(item.id);
   }
 
+  /*
+   * UserSpace usa ON DELETE CASCADE,
+   * então as permissões do usuário
+   * serão removidas automaticamente.
+   */
   await prisma.user.delete({
-    where: { id: userIdToDelete },
+    where: {
+      id: userIdToDelete,
+    },
   });
 
   revalidatePath("/");
@@ -860,6 +926,19 @@ export async function createNewUser(formData: FormData) {
   const role =
     requestedRole === "ADMIN" ? "ADMIN" : "USER";
 
+  /*
+   * Recebe todos os checkboxes chamados "spaceIds".
+   * O Set impede permissões duplicadas.
+   */
+  const requestedSpaceIds = [
+    ...new Set(
+      formData
+        .getAll("spaceIds")
+        .map((value) => value.toString())
+        .filter(Boolean)
+    ),
+  ];
+
   if (!name || !email || !password) {
     throw new Error(
       "Nome, e-mail e senha são obrigatórios."
@@ -884,7 +963,36 @@ export async function createNewUser(formData: FormData) {
     );
   }
 
-  const passwordHash = await hash(password, 10);
+  /*
+   * Confirma que todos os espaços enviados
+   * realmente existem e estão ativos.
+   */
+  const validSpaces =
+    requestedSpaceIds.length > 0
+      ? await prisma.space.findMany({
+          where: {
+            id: {
+              in: requestedSpaceIds,
+            },
+            active: true,
+          },
+          select: {
+            id: true,
+          },
+        })
+      : [];
+
+  if (
+    validSpaces.length !==
+    requestedSpaceIds.length
+  ) {
+    throw new Error(
+      "Um ou mais espaços selecionados são inválidos."
+    );
+  }
+
+  const passwordHash =
+    await hash(password, 10);
 
   await prisma.user.create({
     data: {
@@ -892,11 +1000,23 @@ export async function createNewUser(formData: FormData) {
       email,
       password: passwordHash,
       role,
+
+      /*
+       * Mantemos por compatibilidade com
+       * a estrutura antiga por enquanto.
+       */
       folderName: `Pasta de ${name}`,
+
+      spaceAccesses: {
+        create: validSpaces.map((space) => ({
+          spaceId: space.id,
+        })),
+      },
     },
   });
 
   revalidatePath("/admin/users");
+  revalidatePath("/admin/dashboard");
 }
 
 export async function updateProfile(formData: FormData) {
@@ -1010,29 +1130,47 @@ export async function updateUser(
     formData.get("role")?.toString();
 
   const role =
-    requestedRole === "ADMIN" ? "ADMIN" : "USER";
+    requestedRole === "ADMIN"
+      ? "ADMIN"
+      : "USER";
 
   const password =
     formData.get("password")?.toString() || "";
 
-  if (!userIdToUpdate || !name || !email) {
+  const requestedSpaceIds = [
+    ...new Set(
+      formData
+        .getAll("spaceIds")
+        .map((value) => value.toString())
+        .filter(Boolean)
+    ),
+  ];
+
+  if (
+    !userIdToUpdate ||
+    !name ||
+    !email
+  ) {
     throw new Error(
       "Usuário, nome e e-mail são obrigatórios."
     );
   }
 
-  const targetUser = await prisma.user.findUnique({
-    where: {
-      id: userIdToUpdate,
-    },
-    select: {
-      id: true,
-      role: true,
-    },
-  });
+  const targetUser =
+    await prisma.user.findUnique({
+      where: {
+        id: userIdToUpdate,
+      },
+      select: {
+        id: true,
+        role: true,
+      },
+    });
 
   if (!targetUser) {
-    throw new Error("Usuário não encontrado.");
+    throw new Error(
+      "Usuário não encontrado."
+    );
   }
 
   const conflictingUser =
@@ -1051,21 +1189,52 @@ export async function updateUser(
     );
   }
 
+  /*
+   * Impede que o sistema fique sem administrador.
+   */
   if (
     targetUser.role === "ADMIN" &&
     role !== "ADMIN"
   ) {
-    const adminCount = await prisma.user.count({
-      where: {
-        role: "ADMIN",
-      },
-    });
+    const adminCount =
+      await prisma.user.count({
+        where: {
+          role: "ADMIN",
+        },
+      });
 
     if (adminCount <= 1) {
       throw new Error(
         "Não é possível remover o único administrador."
       );
     }
+  }
+
+  /*
+   * Valida os espaços recebidos.
+   */
+  const validSpaces =
+    requestedSpaceIds.length > 0
+      ? await prisma.space.findMany({
+          where: {
+            id: {
+              in: requestedSpaceIds,
+            },
+            active: true,
+          },
+          select: {
+            id: true,
+          },
+        })
+      : [];
+
+  if (
+    validSpaces.length !==
+    requestedSpaceIds.length
+  ) {
+    throw new Error(
+      "Um ou mais espaços selecionados são inválidos."
+    );
   }
 
   const updateData: {
@@ -1086,17 +1255,45 @@ export async function updateUser(
       );
     }
 
-    updateData.password = await hash(password, 10);
+    updateData.password =
+      await hash(password, 10);
   }
 
-  await prisma.user.update({
-    where: {
-      id: userIdToUpdate,
-    },
-    data: updateData,
-  });
+  /*
+   * Tudo acontece dentro da mesma transação:
+   *
+   * 1. atualiza usuário;
+   * 2. remove permissões antigas;
+   * 3. grava as novas permissões.
+   *
+   * Se qualquer etapa falhar, nada é alterado.
+   */
+  await prisma.$transaction([
+    prisma.user.update({
+      where: {
+        id: userIdToUpdate,
+      },
+      data: updateData,
+    }),
+
+    prisma.userSpace.deleteMany({
+      where: {
+        userId: userIdToUpdate,
+      },
+    }),
+
+    ...validSpaces.map((space) =>
+      prisma.userSpace.create({
+        data: {
+          userId: userIdToUpdate,
+          spaceId: space.id,
+        },
+      })
+    ),
+  ]);
 
   revalidatePath("/admin/users");
+  revalidatePath("/admin/dashboard");
 }
 
 export async function moveUserOrder(formData: FormData) {
