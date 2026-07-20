@@ -46,18 +46,71 @@ async function requireAdmin() {
 
 
 // Verifica permissão: Retorna o item se o usuário pode mexer nele
-async function checkPermission(itemId: string, userEmail: string) {
-  const user = await prisma.user.findUnique({ where: { email: userEmail } });
-  if (!user) throw new Error("Usuário não encontrado");
+async function checkPermission(
+  itemId: string,
+  userEmail: string
+) {
+  const user = await prisma.user.findUnique({
+    where: {
+      email: userEmail,
+    },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+    },
+  });
 
-  const item = await prisma.material.findUnique({ where: { id: itemId } });
-  if (!item) throw new Error("Item não encontrado");
+  if (!user) {
+    throw new Error("Usuário não encontrado.");
+  }
 
-  // Se for Admin, pode tudo. Se for o dono, pode. Senão, erro.
-  if (user.role === 'ADMIN' || item.userId === user.id) {
+  const item = await prisma.material.findUnique({
+    where: {
+      id: itemId,
+    },
+  });
+
+  if (!item) {
+    throw new Error("Item não encontrado.");
+  }
+
+  /*
+   * ADMIN pode gerenciar qualquer material.
+   */
+  if (user.role === "ADMIN") {
     return { item, user };
   }
-  
+
+  /*
+   * NOVA ESTRUTURA:
+   * se o material pertence a um espaço,
+   * verificamos o acesso ao espaço.
+   */
+  if (item.spaceId) {
+    const hasAccess = await canManageSpace(
+      user,
+      item.spaceId
+    );
+
+    if (hasAccess) {
+      return { item, user };
+    }
+
+    throw new Error(
+      "Você não possui permissão para gerenciar este espaço."
+    );
+  }
+
+  /*
+   * ESTRUTURA ANTIGA:
+   * materiais sem spaceId continuam usando
+   * a antiga regra de proprietário.
+   */
+  if (item.userId === user.id) {
+    return { item, user };
+  }
+
   throw new Error("Permissão negada.");
 }
 async function requireAuthenticatedUser() {
@@ -420,43 +473,125 @@ export async function deleteUser(formData: FormData) {
   revalidatePath("/admin/dashboard");
 }
 // --- 6. MOVER ---
-export async function moveMaterial(formData: FormData) {
+export async function moveMaterial(
+  formData: FormData
+) {
   const user = await requireAuthenticatedUser();
-  const itemId = formData.get("itemId") as string;
-  const newParentId = formData.get("newParentId") as string;
-  const finalParentId = (newParentId === "root" || newParentId === "") ? null : newParentId;
 
-  const { item } = await checkPermission(itemId, user.email);
+  const itemId =
+    formData.get("itemId")?.toString() || "";
 
-  if (itemId === finalParentId) throw new Error("Destino inválido.");
+  const newParentId =
+    formData.get("newParentId")?.toString() || "";
+
+  const finalParentId =
+    newParentId === "root" || newParentId === ""
+      ? null
+      : newParentId;
+
+  if (!itemId) {
+    throw new Error("Material não informado.");
+  }
+
+  const { item } = await checkPermission(
+    itemId,
+    user.email
+  );
+
+  if (itemId === finalParentId) {
+    throw new Error("Destino inválido.");
+  }
 
   if (finalParentId) {
-    const destination = await prisma.material.findUnique({
-      where: { id: finalParentId },
-    });
+    const destination =
+      await prisma.material.findUnique({
+        where: {
+          id: finalParentId,
+        },
+      });
 
-    if (!destination || destination.type !== "FOLDER") {
-      throw new Error("Pasta de destino inválida.");
-    }
-
-    if (destination.userId !== item.userId) {
+    if (
+      !destination ||
+      destination.type !== "FOLDER"
+    ) {
       throw new Error(
-        "Não é permitido mover materiais entre usuários diferentes."
+        "Pasta de destino inválida."
       );
     }
-      let currentCheckId = finalParentId;
-      while (currentCheckId) {
-        if (currentCheckId === itemId) throw new Error("Não pode mover para subpasta própria.");
-        const parent = await prisma.material.findUnique({ where: { id: currentCheckId } });
-        if (!parent || !parent.parentId) break;
-        currentCheckId = parent.parentId;
+
+    /*
+     * Materiais da nova estrutura só podem
+     * ser movidos dentro do mesmo espaço.
+     */
+    if (item.spaceId) {
+      if (destination.spaceId !== item.spaceId) {
+        throw new Error(
+          "Não é permitido mover materiais entre espaços diferentes."
+        );
+      }
+    } else {
+      /*
+       * Compatibilidade com a estrutura antiga.
+       * Um material antigo não pode ser movido
+       * para dentro de um espaço novo.
+       */
+      if (
+        destination.spaceId ||
+        destination.userId !== item.userId
+      ) {
+        throw new Error(
+          "Não é permitido mover este material para essa pasta."
+        );
       }
     }
 
+    /*
+     * Impede:
+     *
+     * Pasta A
+     *   └── Pasta B
+     *
+     * de mover a Pasta A para dentro da Pasta B.
+     */
+    let currentCheckId: string | null =
+      finalParentId;
+
+    while (currentCheckId) {
+      if (currentCheckId === itemId) {
+        throw new Error(
+          "Não é possível mover uma pasta para dentro dela mesma."
+        );
+      }
+
+      const parent:
+        | { parentId: string | null }
+        | null =
+        await prisma.material.findUnique({
+          where: {
+            id: currentCheckId,
+          },
+          select: {
+            parentId: true,
+          },
+        });
+
+      if (!parent?.parentId) {
+        break;
+      }
+
+      currentCheckId = parent.parentId;
+    }
+  }
+
   await prisma.material.update({
-    where: { id: itemId },
-    data: { parentId: finalParentId }
+    where: {
+      id: itemId,
+    },
+    data: {
+      parentId: finalParentId,
+    },
   });
+
   revalidatePath("/admin/dashboard");
 }
 
@@ -464,11 +599,7 @@ export async function moveMaterial(formData: FormData) {
 export async function deleteMaterial(id: string) {
   const user = await requireAuthenticatedUser();
 
-  try {
-    await checkPermission(id, user.email);
-  } catch {
-    return;
-  }
+  await checkPermission(id, user.email);
 
   const item = await prisma.material.findUnique({
     where: { id },
