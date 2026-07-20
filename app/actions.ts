@@ -16,6 +16,7 @@ import { hash } from "bcryptjs";
 import AdmZip from "adm-zip";
 import { randomUUID } from "crypto";
 import { authOptions } from "./lib/auth";
+import { canManageSpace } from "./lib/space-permissions";
 
 // --- HELPERS ---
 async function requireAdmin() {
@@ -165,61 +166,204 @@ export async function uploadFiles(formData: FormData) {
 // --- 2. CRIAR PASTA CORRIGIDO (COM HERANÇA DE DONO) ---
 export async function createFolder(formData: FormData) {
   const user = await requireAuthenticatedUser();
-  
-  const name = formData.get("name") as string;
-  const rawParentId = formData.get("parentId") as string;
-  const parentId = (rawParentId === "" || rawParentId === "root") ? null : rawParentId;
 
-  // Lógica de Dono
-  let targetUserId = user.id;
-  if (parentId) {
-      const parent = await prisma.material.findUnique({ where: { id: parentId } });
-      if (parent) targetUserId = parent.userId;
-  } else {
-      const formTargetId = formData.get("targetUserId") as string;
-      if (formTargetId) targetUserId = formTargetId;
+  const name =
+    formData.get("name")?.toString().trim() || "";
+
+  const rawParentId =
+    formData.get("parentId")?.toString() || "";
+
+  const parentId =
+    rawParentId === "" || rawParentId === "root"
+      ? null
+      : rawParentId;
+
+  const spaceId =
+    formData.get("spaceId")?.toString().trim() || "";
+
+  if (!name) {
+    throw new Error("O nome da pasta é obrigatório.");
   }
 
-  if (user.id !== targetUserId && user.role !== 'ADMIN') throw new Error("Sem permissão.");
+  if (!spaceId) {
+    throw new Error("Espaço não informado.");
+  }
+
+  const space = await prisma.space.findUnique({
+    where: {
+      id: spaceId,
+    },
+    select: {
+      id: true,
+      active: true,
+    },
+  });
+
+  if (!space || !space.active) {
+    throw new Error("Espaço não encontrado.");
+  }
+
+  const hasAccess = await canManageSpace(
+    user,
+    spaceId
+  );
+
+  if (!hasAccess) {
+    throw new Error(
+      "Você não possui permissão para gerenciar este espaço."
+    );
+  }
+
+  /*
+   * Se estiver criando dentro de outra pasta,
+   * garantimos que essa pasta pertence ao mesmo espaço.
+   */
+  if (parentId) {
+    const parent = await prisma.material.findUnique({
+      where: {
+        id: parentId,
+      },
+      select: {
+        id: true,
+        type: true,
+        spaceId: true,
+      },
+    });
+
+    if (
+      !parent ||
+      parent.type !== "FOLDER" ||
+      parent.spaceId !== spaceId
+    ) {
+      throw new Error(
+        "Pasta de destino inválida."
+      );
+    }
+  }
 
   await prisma.material.create({
-    data: { title: name, type: "FOLDER", size: 0, userId: targetUserId, parentId: parentId }
+    data: {
+      title: name,
+      type: "FOLDER",
+      size: 0,
+
+      // Quem criou
+      userId: user.id,
+
+      // Onde pertence
+      spaceId,
+
+      parentId,
+    },
   });
+
   revalidatePath("/admin/dashboard");
 }
 
 // --- 3. CRIAR LINK CORRIGIDO (COM HERANÇA DE DONO) ---
 export async function createLink(formData: FormData) {
-    const user = await requireAuthenticatedUser();
+  const user = await requireAuthenticatedUser();
 
-    const title = formData.get("title") as string;
-    const url = formData.get("url") as string;
-    const rawParentId = formData.get("parentId") as string;
-    const parentId = (rawParentId === "" || rawParentId === "root") ? null : rawParentId;
+  const title =
+    formData.get("title")?.toString().trim() || "";
 
-    // Lógica de Dono
-    let targetUserId = user.id;
-    if (parentId) {
-        const parent = await prisma.material.findUnique({ where: { id: parentId } });
-        if (parent) targetUserId = parent.userId;
-    } else {
-        const formTargetId = formData.get("targetUserId") as string;
-        if (formTargetId) targetUserId = formTargetId;
-    }
+  const rawUrl =
+    formData.get("url")?.toString().trim() || "";
 
-    if (user.id !== targetUserId && user.role !== 'ADMIN') throw new Error("Sem permissão.");
+  const rawParentId =
+    formData.get("parentId")?.toString() || "";
 
-    await prisma.material.create({
-        data: {
-            title: title || "Novo Link",
-            type: "LINK",
-            fileUrl: url.startsWith("http") ? url : `https://${url}`,
-            size: 0,
-            userId: targetUserId,
-            parentId: parentId,
-        }
+  const parentId =
+    rawParentId === "" || rawParentId === "root"
+      ? null
+      : rawParentId;
+
+  const spaceId =
+    formData.get("spaceId")?.toString().trim() || "";
+
+  if (!title) {
+    throw new Error("O nome do link é obrigatório.");
+  }
+
+  if (!rawUrl) {
+    throw new Error("O endereço do link é obrigatório.");
+  }
+
+  if (!spaceId) {
+    throw new Error("Espaço não informado.");
+  }
+
+  const space = await prisma.space.findUnique({
+    where: {
+      id: spaceId,
+    },
+    select: {
+      id: true,
+      active: true,
+    },
+  });
+
+  if (!space || !space.active) {
+    throw new Error("Espaço não encontrado.");
+  }
+
+  const hasAccess = await canManageSpace(
+    user,
+    spaceId
+  );
+
+  if (!hasAccess) {
+    throw new Error(
+      "Você não possui permissão para gerenciar este espaço."
+    );
+  }
+
+  if (parentId) {
+    const parent = await prisma.material.findUnique({
+      where: {
+        id: parentId,
+      },
+      select: {
+        id: true,
+        type: true,
+        spaceId: true,
+      },
     });
-    revalidatePath("/admin/dashboard");
+
+    if (
+      !parent ||
+      parent.type !== "FOLDER" ||
+      parent.spaceId !== spaceId
+    ) {
+      throw new Error(
+        "Pasta de destino inválida."
+      );
+    }
+  }
+
+  const url = rawUrl.startsWith("http://") ||
+    rawUrl.startsWith("https://")
+      ? rawUrl
+      : `https://${rawUrl}`;
+
+  await prisma.material.create({
+    data: {
+      title,
+      type: "LINK",
+      fileUrl: url,
+      size: 0,
+
+      // Quem criou
+      userId: user.id,
+
+      // Onde pertence
+      spaceId,
+
+      parentId,
+    },
+  });
+
+  revalidatePath("/admin/dashboard");
 }
 
 // --- 4. RENOMEAR (ESTAVA FALTANDO) ---
