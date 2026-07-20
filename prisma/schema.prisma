@@ -8,18 +8,19 @@ datasource db {
 }
 
 model User {
-  id                String     @id @default(uuid())
+  id                String      @id @default(uuid())
   name              String
-  email             String     @unique
+  email             String      @unique
   password          String
-  role              String     @default("USER")
-  folderName        String?    @default("Minha Pasta")
-  folderCategory    String?    @default("Geral")
+  role              String      @default("USER")
+  folderName        String?     @default("Minha Pasta")
+  folderCategory    String?     @default("Geral")
   folderDescription String?
   materials         Material[]
-  displayOrder      Int        @default(999)
-  createdAt         DateTime   @default(now())
+  displayOrder      Int         @default(999)
+  createdAt         DateTime    @default(now())
   books             Book[]
+  spaceAccesses     UserSpace[]
 
   @@map("users")
 }
@@ -35,6 +36,8 @@ model Material {
   children  Material[] @relation("FolderHierarchy")
   userId    String
   user      User       @relation(fields: [userId], references: [id])
+  spaceId   String?
+  space     Space?     @relation(fields: [spaceId], references: [id], onDelete: SetNull)
   createdAt DateTime   @default(now())
 
   @@map("materials")
@@ -62,4 +65,35 @@ model Book {
   createdAt   DateTime @default(now())
   userId      String
   user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Space {
+  id           String   @id @default(uuid())
+  name         String
+  slug         String   @unique
+  imageUrl     String?
+  displayOrder Int      @default(999)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  materials    Material[]
+  userAccesses UserSpace[]
+
+  @@map("spaces")
+}
+
+model UserSpace {
+  id        String   @id @default(uuid())
+  userId    String
+  spaceId   String
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  space Space @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, spaceId])
+  @@index([userId])
+  @@index([spaceId])
+  @@map("user_spaces")
 }
