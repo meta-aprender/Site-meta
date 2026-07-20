@@ -249,6 +249,24 @@ export default async function SpacePage(
         : `/espacos/${space.slug}`
       : "/";
 
+    function getImageSrc(imageUrl: string | null) {
+  if (!imageUrl) {
+    return null;
+  }
+
+  if (
+    imageUrl.startsWith("http://") ||
+    imageUrl.startsWith("https://") ||
+    imageUrl.startsWith("/")
+  ) {
+    return imageUrl;
+  }
+
+  return `/api/download?path=${encodeURIComponent(
+    imageUrl
+  )}&view=true`;
+}
+
   return (
     <div className="min-h-screen bg-[#F5F5F3] text-[#111111]">
 
@@ -351,7 +369,7 @@ export default async function SpacePage(
             {space.imageUrl && (
               <img
                 src={
-                  space.imageUrl
+                  getImageSrc(space.imageUrl) ?? ""
                 }
                 alt=""
                 className="

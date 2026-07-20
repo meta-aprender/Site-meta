@@ -20,6 +20,24 @@ import {
 
 import { Poppins } from "next/font/google";
 
+function getImageSrc(imageUrl: string | null) {
+  if (!imageUrl) {
+    return null;
+  }
+
+  if (
+    imageUrl.startsWith("http://") ||
+    imageUrl.startsWith("https://") ||
+    imageUrl.startsWith("/")
+  ) {
+    return imageUrl;
+  }
+
+  return `/api/download?path=${encodeURIComponent(
+    imageUrl
+  )}&view=true`;
+}  
+
 const poppins = Poppins({
   subsets: ["latin"],
   weight: [
@@ -379,7 +397,7 @@ export default function Showcase({
                         {space.imageUrl ? (
                           <img
                             src={
-                              space.imageUrl
+                              getImageSrc(space.imageUrl) ?? ""
                             }
                             alt={
                               space.name

@@ -1,6 +1,7 @@
 import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import LoginForm from "./LoginForm"; // Importa o formulário que criamos
+import PasswordInput from "./PasswordInput";
 
 export const dynamic = 'force-dynamic';
 

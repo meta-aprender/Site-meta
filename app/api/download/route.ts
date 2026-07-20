@@ -502,6 +502,42 @@ export async function GET(
 
     isPublicFile = true;
   }
+  else if (
+  storageCategory === "space-images"
+) {
+  if (segments.length < 3) {
+    return new NextResponse(
+      "Caminho de imagem inválido.",
+      {
+        status: 400,
+      }
+    );
+  }
+
+  const space =
+    await prisma.space.findFirst({
+      where: {
+        imageUrl: {
+          in: pathCandidates,
+        },
+      },
+
+      select: {
+        id: true,
+      },
+    });
+
+  if (!space) {
+    return new NextResponse(
+      "Imagem não encontrada.",
+      {
+        status: 404,
+      }
+    );
+  }
+
+  isPublicFile = true;
+}
 
   /*
    * ==========================================================
@@ -603,7 +639,8 @@ export async function GET(
    */
   if (
     storageCategory === "books" ||
-    storageCategory === "spaces"
+    storageCategory === "spaces"||
+    storageCategory === "space-images"
   ) {
     try {
       const signedUrl =
